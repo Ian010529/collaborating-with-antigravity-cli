@@ -33,6 +33,25 @@ MODE_DEFAULT_MODELS = {
     "ask": DEFAULT_QUICK_MODEL,
 }
 
+RESPONSE_BUDGETS = {
+    "standard": {
+        "review-plan": (
+            "Response budget: use only Verdict, Blocking Issues, Important Suggestions, and Tests. "
+            "Max 8 bullets or 600 words. Omit praise and context recap."
+        ),
+        "review-code": (
+            "Response budget: findings first, max 10 actionable findings or 700 words. "
+            "Do not paste large code/diff excerpts. If no blocking issues, say so in one sentence."
+        ),
+        "ask": "Response budget: answer in 400 words or fewer. Prefer concise bullets.",
+    },
+    "compact": {
+        "review-plan": "Response budget: max 5 bullets or 300 words. Include only blockers, key risks, and test gaps.",
+        "review-code": "Response budget: max 5 findings or 350 words. Include only actionable bugs, regressions, and test gaps.",
+        "ask": "Response budget: answer in 150 words or fewer.",
+    },
+}
+
 MODE_INSTRUCTIONS = {
     "review-plan": (
         "Role: independent planning reviewer.\n"
@@ -326,8 +345,16 @@ def run_test_commands(commands: list[str], cwd: Path) -> str:
     return "\n\n".join(blocks).strip()
 
 
+def response_budget_instruction(mode: str, budget: str) -> str:
+    if budget == "none":
+        return ""
+    return RESPONSE_BUDGETS.get(budget, RESPONSE_BUDGETS["standard"]).get(mode, "")
+
+
 def build_prompt(args: argparse.Namespace, focus_files: list[str], context_text: str = "", test_output: str = "") -> str:
     access_line = "Access: read-only. Do not edit files; propose patches or findings instead."
+    budget_line = response_budget_instruction(args.mode, getattr(args, "response_budget", "standard"))
+    budget_lines = f"\n{budget_line}" if budget_line else ""
 
     focus_lines = ""
     if focus_files:
@@ -357,6 +384,7 @@ def build_prompt(args: argparse.Namespace, focus_files: list[str], context_text:
     return (
         f"{MODE_INSTRUCTIONS[args.mode]}\n\n"
         f"{access_line}"
+        f"{budget_lines}"
         f"{focus_lines}"
         f"{test_lines}"
         f"{context_lines}"
@@ -421,6 +449,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stream-status-interval-s", type=float, default=30.0, help="Heartbeat interval in seconds.")
     parser.add_argument("--guardrails", dest="guardrails", action="store_true", default=True, help="Enable scope guardrails.")
     parser.add_argument("--no-guardrails", dest="guardrails", action="store_false", help="Disable scope guardrails.")
+    parser.add_argument(
+        "--response-budget",
+        choices=["standard", "compact", "none"],
+        default="standard",
+        help="Constrain agy's response length to reduce host-agent context. Use none for unusually broad audits.",
+    )
     parser.add_argument("--auto-extract-files", action="store_true", default=True, help="Auto-detect file paths from PROMPT.")
     parser.add_argument("--no-auto-extract-files", dest="auto_extract_files", action="store_false", help="Disable auto file extraction.")
     parser.add_argument("--max-files", type=int, default=5, help="Cap auto-extracted focus files.")

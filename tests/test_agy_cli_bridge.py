@@ -71,6 +71,42 @@ class AgyCliBridgeTests(unittest.TestCase):
         self.assertIn("Do not edit files", prompt)
         self.assertIn("@README.md", prompt)
 
+    def test_response_budget_is_added_by_default(self) -> None:
+        args = argparse.Namespace(
+            mode="review-code",
+            guardrails=True,
+            test_command=[],
+            response_budget="standard",
+            PROMPT="Review code.",
+        )
+
+        prompt = bridge.build_prompt(args, [])
+
+        self.assertIn("Response budget:", prompt)
+        self.assertIn("max 10 actionable findings", prompt)
+
+    def test_response_budget_can_be_compact_or_disabled(self) -> None:
+        compact_args = argparse.Namespace(
+            mode="review-plan",
+            guardrails=True,
+            test_command=[],
+            response_budget="compact",
+            PROMPT="Review plan.",
+        )
+        none_args = argparse.Namespace(
+            mode="review-plan",
+            guardrails=True,
+            test_command=[],
+            response_budget="none",
+            PROMPT="Review plan.",
+        )
+
+        compact_prompt = bridge.build_prompt(compact_args, [])
+        none_prompt = bridge.build_prompt(none_args, [])
+
+        self.assertIn("max 5 bullets", compact_prompt)
+        self.assertNotIn("Response budget:", none_prompt)
+
     def test_command_meta_redacts_prompt(self) -> None:
         args = argparse.Namespace(
             agy_bin="agy",
