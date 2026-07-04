@@ -21,11 +21,15 @@ from typing import Any
 
 
 DEFAULT_PRINT_TIMEOUT = "5m0s"
+DEFAULT_REVIEW_CODE_PRINT_TIMEOUT = "15m0s"
+DEFAULT_PREFLIGHT_PRINT_TIMEOUT = "30s"
 DEFAULT_MAX_FOCUS_BYTES = 200_000
 DEFAULT_STATE_DIR = ".codex-antigravity"
 DEFAULT_MAX_CONTEXT_BYTES = 50_000
+DEFAULT_MAX_DIFF_BYTES = 120_000
 DEFAULT_REVIEW_PLAN_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_REVIEW_CODE_MODEL = "Claude Sonnet 4.6 (Thinking)"
+DEFAULT_REVIEW_CODE_FALLBACK_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_QUICK_MODEL = "Gemini 3.1 Pro (Low)"
 MODE_DEFAULT_MODELS = {
     "review-plan": DEFAULT_REVIEW_PLAN_MODEL,
@@ -148,6 +152,38 @@ def run_command(
     return process.returncode, stdout, stderr
 
 
+def run_local_command(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(cwd),
+    )
+    return res.returncode, res.stdout, res.stderr
+
+
+def is_authentication_error(stdout: str, stderr: str) -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "authentication failed",
+            "please sign in",
+            "not signed in",
+            "sign in to",
+            "login required",
+        )
+    )
+
+
+def is_timeout_error(rc: int, stdout: str, stderr: str) -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    return rc == 124 or "timed out" in text or "timeout waiting for response" in text
+
+
 def normalize_focus_files(cd_path: Path, files: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -266,6 +302,63 @@ def load_context_files(
     return contexts, "\n\n".join(blocks).strip(), warnings
 
 
+def load_git_diff(cd_path: Path, max_diff_bytes: int) -> tuple[dict[str, Any], str, list[str]]:
+    warnings: list[str] = []
+    meta: dict[str, Any] = {
+        "included": False,
+        "truncated": False,
+        "diff_bytes": 0,
+        "stat_bytes": 0,
+        "files": [],
+    }
+
+    stat_rc, stat, stat_err = run_local_command(["git", "diff", "--no-ext-diff", "--stat"], cd_path)
+    names_rc, names, names_err = run_local_command(["git", "diff", "--no-ext-diff", "--name-only"], cd_path)
+    diff_rc, diff, diff_err = run_local_command(["git", "diff", "--no-ext-diff"], cd_path)
+    if stat_rc != 0 or names_rc != 0 or diff_rc != 0:
+        errors = "\n".join(part.strip() for part in (stat_err, names_err, diff_err) if part.strip())
+        warnings.append(f"Unable to load git diff: {errors or 'git diff failed'}")
+        return meta, "", warnings
+
+    files = [line.strip() for line in names.splitlines() if line.strip()]
+    diff_bytes = len(diff.encode("utf-8", errors="replace"))
+    stat_bytes = len(stat.encode("utf-8", errors="replace"))
+    meta.update({"diff_bytes": diff_bytes, "stat_bytes": stat_bytes, "files": files})
+
+    if not stat.strip() and not diff.strip():
+        return meta, "### Git Diff Snapshot\n\nNo tracked git diff is currently present.", warnings
+
+    if diff_bytes > max_diff_bytes:
+        meta["truncated"] = True
+        warnings.append(
+            f"Git diff is {diff_bytes:,} bytes, exceeding --max-diff-bytes {max_diff_bytes:,}; "
+            "included only diff stat and file list."
+        )
+        file_list = "\n".join(f"- {path}" for path in files) or "- (no files reported)"
+        text = (
+            "### Git Diff Snapshot (truncated)\n\n"
+            f"Diff bytes: {diff_bytes:,}; max allowed: {max_diff_bytes:,}.\n\n"
+            "Diff stat:\n```text\n"
+            f"{stat.strip()}\n"
+            "```\n\n"
+            "Changed files:\n"
+            f"{file_list}"
+        )
+        return meta, text, warnings
+
+    meta["included"] = True
+    text = (
+        "### Git Diff Snapshot\n\n"
+        "Diff stat:\n```text\n"
+        f"{stat.strip()}\n"
+        "```\n\n"
+        "Full diff:\n```diff\n"
+        f"{diff.strip()}\n"
+        "```"
+    )
+    return meta, text, warnings
+
+
 def write_text_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -351,7 +444,13 @@ def response_budget_instruction(mode: str, budget: str) -> str:
     return RESPONSE_BUDGETS.get(budget, RESPONSE_BUDGETS["standard"]).get(mode, "")
 
 
-def build_prompt(args: argparse.Namespace, focus_files: list[str], context_text: str = "", test_output: str = "") -> str:
+def build_prompt(
+    args: argparse.Namespace,
+    focus_files: list[str],
+    context_text: str = "",
+    test_output: str = "",
+    git_diff_text: str = "",
+) -> str:
     access_line = "Access: read-only. Do not edit files; propose patches or findings instead."
     budget_line = response_budget_instruction(args.mode, getattr(args, "response_budget", "standard"))
     budget_lines = f"\n{budget_line}" if budget_line else ""
@@ -372,6 +471,10 @@ def build_prompt(args: argparse.Namespace, focus_files: list[str], context_text:
     if context_text:
         context_lines = f"\nPersisted handoff context:\n{context_text}\n"
 
+    diff_lines = ""
+    if git_diff_text:
+        diff_lines = f"\nGit diff context:\n{git_diff_text}\n"
+
     guardrails = ""
     if args.guardrails:
         guardrails = (
@@ -387,6 +490,7 @@ def build_prompt(args: argparse.Namespace, focus_files: list[str], context_text:
         f"{budget_lines}"
         f"{focus_lines}"
         f"{test_lines}"
+        f"{diff_lines}"
         f"{context_lines}"
         f"{guardrails}\n"
         f"User task:\n{args.PROMPT}"
@@ -411,6 +515,16 @@ def build_command(args: argparse.Namespace, prompt: str) -> list[str]:
     return cmd
 
 
+def build_preflight_command(args: argparse.Namespace) -> list[str]:
+    return [
+        args.agy_bin,
+        "--print-timeout",
+        args.preflight_timeout,
+        "--print",
+        "Reply with exactly: ok",
+    ]
+
+
 def command_for_meta(cmd: list[str]) -> list[str]:
     if "--print" not in cmd:
         return cmd
@@ -420,6 +534,12 @@ def command_for_meta(cmd: list[str]) -> list[str]:
 
 def default_model_for_mode(mode: str) -> str:
     return MODE_DEFAULT_MODELS.get(mode, DEFAULT_QUICK_MODEL)
+
+
+def default_print_timeout_for_mode(mode: str) -> str:
+    if mode == "review-code":
+        return DEFAULT_REVIEW_CODE_PRINT_TIMEOUT
+    return DEFAULT_PRINT_TIMEOUT
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -436,8 +556,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "review-code uses Claude Sonnet 4.6 (Thinking), ask uses Gemini 3.1 Pro (Low)."
         ),
     )
-    parser.add_argument("--print-timeout", default=DEFAULT_PRINT_TIMEOUT, help="agy print-mode timeout, e.g. 5m0s.")
+    parser.add_argument("--print-timeout", default="", help="agy print-mode timeout, e.g. 5m0s. Defaults by mode.")
     parser.add_argument("--timeout-s", type=float, default=1800.0, help="Outer process timeout in seconds.")
+    parser.add_argument("--fallback-model", default="", help="Optional model to retry once after a non-authentication timeout.")
     parser.add_argument("--file", dest="files", action="append", default=[], help="Focus file, repeatable.")
     parser.add_argument("--add-dir", action="append", default=[], help="Extra workspace directory for agy, repeatable.")
     parser.add_argument("--test-command", action="append", default=[], help="Validation command to mention to agy.")
@@ -459,6 +580,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-auto-extract-files", dest="auto_extract_files", action="store_false", help="Disable auto file extraction.")
     parser.add_argument("--max-files", type=int, default=5, help="Cap auto-extracted focus files.")
     parser.add_argument("--max-focus-bytes", type=int, default=DEFAULT_MAX_FOCUS_BYTES, help="Warning threshold for focus file bytes.")
+    parser.add_argument("--include-git-diff", dest="include_git_diff", action="store_true", default=None, help="Include a bounded git diff snapshot in review-code prompts.")
+    parser.add_argument("--no-include-git-diff", dest="include_git_diff", action="store_false", help="Do not include git diff context.")
+    parser.add_argument("--max-diff-bytes", type=int, default=DEFAULT_MAX_DIFF_BYTES, help="Maximum full git diff bytes to include in review-code prompts.")
+    parser.add_argument("--preflight", dest="preflight", action="store_true", default=None, help="Run a short agy health check before review-code.")
+    parser.add_argument("--no-preflight", dest="preflight", action="store_false", help="Skip agy health check.")
+    parser.add_argument("--preflight-timeout", default=DEFAULT_PREFLIGHT_PRINT_TIMEOUT, help="agy print timeout for the preflight check.")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help="State directory for handoff files. Defaults to .codex-antigravity.")
     parser.add_argument("--context-file", action="append", default=[], help="Markdown/text context file to include in the prompt, repeatable.")
     parser.add_argument("--write-output", default="", help="Write agy response to this file. Relative paths are under --state-dir.")
@@ -482,6 +609,14 @@ def main(argv: list[str] | None = None) -> int:
     run_id = safe_run_id(args.run_id, args.mode)
     model_source = "explicit" if args.model.strip() else "default"
     args.model = args.model.strip() or default_model_for_mode(args.mode)
+    args.print_timeout = args.print_timeout.strip() or default_print_timeout_for_mode(args.mode)
+    args.fallback_model = args.fallback_model.strip()
+    if args.mode == "review-code" and not args.fallback_model:
+        args.fallback_model = DEFAULT_REVIEW_CODE_FALLBACK_MODEL
+    if args.include_git_diff is None:
+        args.include_git_diff = args.mode == "review-code"
+    if args.preflight is None:
+        args.preflight = args.mode == "review-code"
 
     explicit_focus_files = normalize_focus_files(cd_path, args.files)
     auto_focus_files: list[str] = []
@@ -512,12 +647,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     warnings.extend(context_warnings)
 
-    test_output = ""
-    if args.test_command and not args.dry_run:
-        test_output = run_test_commands(args.test_command, cd_path)
+    git_diff_meta: dict[str, Any] = {}
+    git_diff_text = ""
+    if args.include_git_diff:
+        git_diff_meta, git_diff_text, git_diff_warnings = load_git_diff(cd_path, args.max_diff_bytes)
+        warnings.extend(git_diff_warnings)
 
-    prompt = build_prompt(args, focus_files, context_text, test_output)
-    cmd = build_command(args, prompt)
     meta: dict[str, Any] = {
         "cli": "agy",
         "mode": args.mode,
@@ -531,14 +666,68 @@ def main(argv: list[str] | None = None) -> int:
         "auto_focus_files": auto_focus_files,
         "focus_bytes": focus_bytes,
         "context_files": context_files,
+        "git_diff": git_diff_meta,
+        "preflight": args.preflight,
+        "fallback_model": args.fallback_model,
         "warnings": warnings,
-        "command": command_for_meta(cmd),
     }
 
     if args.dry_run:
+        prompt = build_prompt(args, focus_files, context_text, "", git_diff_text)
+        cmd = build_command(args, prompt)
+        meta["command"] = command_for_meta(cmd)
         result = {"success": True, "agent_messages": "", "meta": {**meta, "prompt": prompt, "dry_run": True}}
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
+
+    if args.preflight:
+        preflight_cmd = build_preflight_command(args)
+        preflight_meta: dict[str, Any] = {"command": command_for_meta(preflight_cmd)}
+        try:
+            preflight_rc, preflight_stdout, preflight_stderr = run_command(
+                preflight_cmd,
+                timeout_s=90.0,
+                cwd=cd_path,
+                stream_status=False,
+            )
+        except FileNotFoundError as error:
+            result = {
+                "success": False,
+                "error": f"Failed to execute Antigravity CLI. Is `agy` installed and on PATH?\n\n{error}",
+                "meta": {**meta, "preflight": preflight_meta},
+            }
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 127
+        preflight_meta.update(
+            {
+                "exit_code": preflight_rc,
+                "stdout": preflight_stdout.strip(),
+                "stderr": preflight_stderr.strip(),
+            }
+        )
+        meta["preflight"] = preflight_meta
+        if preflight_rc != 0 or preflight_stdout.strip().lower() != "ok":
+            auth_hint = ""
+            if is_authentication_error(preflight_stdout, preflight_stderr):
+                auth_hint = (
+                    "\n\nAntigravity CLI authentication appears unhealthy. Run `agy` in a terminal to sign in, "
+                    "then verify with `agy --print-timeout 30s --print \"Reply with exactly: ok\"`."
+                )
+            result = {
+                "success": False,
+                "error": f"Antigravity CLI preflight failed; skipped the longer review-code request.{auth_hint}",
+                "meta": meta,
+            }
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 1
+
+    test_output = ""
+    if args.test_command:
+        test_output = run_test_commands(args.test_command, cd_path)
+
+    prompt = build_prompt(args, focus_files, context_text, test_output, git_diff_text)
+    cmd = build_command(args, prompt)
+    meta["command"] = command_for_meta(cmd)
 
     try:
         rc, stdout, stderr = run_command(
@@ -557,6 +746,36 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 127
 
+    if (
+        rc != 0
+        and args.fallback_model
+        and args.fallback_model != args.model
+        and not is_authentication_error(stdout, stderr)
+        and is_timeout_error(rc, stdout, stderr)
+    ):
+        primary_model = args.model
+        meta["fallback"] = {
+            "attempted": True,
+            "from_model": primary_model,
+            "to_model": args.fallback_model,
+            "primary": {
+                "exit_code": rc,
+                "stdout": stdout.strip(),
+                "stderr": stderr.strip(),
+            },
+        }
+        args.model = args.fallback_model
+        fallback_cmd = build_command(args, prompt)
+        meta["fallback"]["command"] = command_for_meta(fallback_cmd)
+        rc, stdout, stderr = run_command(
+            fallback_cmd,
+            timeout_s=args.timeout_s,
+            cwd=cd_path,
+            stream_status=args.stream_status,
+            stream_status_interval_s=args.stream_status_interval_s,
+        )
+        meta["model"] = args.model
+
     agent_messages = stdout.strip()
     meta["exit_code"] = rc
     if stderr.strip():
@@ -569,6 +788,11 @@ def main(argv: list[str] | None = None) -> int:
             error_bits.append("Antigravity CLI process timed out.")
         elif rc != 0:
             error_bits.append(f"Antigravity CLI exited with code {rc}.")
+        if is_authentication_error(stdout, stderr):
+            error_bits.append(
+                "Antigravity CLI authentication appears unhealthy. Run `agy` in a terminal to sign in, "
+                "then verify with `agy --print-timeout 30s --print \"Reply with exactly: ok\"`."
+            )
         if stderr.strip():
             error_bits.append(f"[stderr]\n{stderr.strip()}")
         if stdout.strip():

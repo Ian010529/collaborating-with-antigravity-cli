@@ -128,6 +128,83 @@ class AgyCliBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.default_model_for_mode("review-code"), "Claude Sonnet 4.6 (Thinking)")
         self.assertEqual(bridge.default_model_for_mode("ask"), "Gemini 3.1 Pro (Low)")
 
+    def test_default_print_timeout_for_mode(self) -> None:
+        self.assertEqual(bridge.default_print_timeout_for_mode("review-code"), "15m0s")
+        self.assertEqual(bridge.default_print_timeout_for_mode("ask"), "5m0s")
+        self.assertEqual(bridge.default_print_timeout_for_mode("review-plan"), "5m0s")
+
+    def test_review_code_dry_run_includes_git_diff_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init_clean_repo(root)
+            (root / "src.py").write_text("print('changed')\n", encoding="utf-8")
+            stdout = StringIO()
+            argv = ["--cd", tmp, "--mode", "review-code", "--PROMPT", "Review code.", "--dry-run"]
+
+            with redirect_stdout(stdout):
+                exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertIn("Git diff context", payload["meta"]["prompt"])
+            self.assertIn("Full diff", payload["meta"]["prompt"])
+            self.assertIn("print('changed')", payload["meta"]["prompt"])
+            self.assertTrue(payload["meta"]["git_diff"]["included"])
+            self.assertIn("15m0s", payload["meta"]["command"])
+
+    def test_review_code_dry_run_can_disable_git_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init_clean_repo(root)
+            (root / "src.py").write_text("print('changed')\n", encoding="utf-8")
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--no-include-git-diff",
+                "--PROMPT",
+                "Review code.",
+                "--dry-run",
+            ]
+
+            with redirect_stdout(stdout):
+                exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn("Git diff context", payload["meta"]["prompt"])
+            self.assertEqual(payload["meta"]["git_diff"], {})
+
+    def test_large_git_diff_is_truncated_to_stat_and_file_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init_clean_repo(root)
+            (root / "src.py").write_text("print('changed a lot')\n" * 20, encoding="utf-8")
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--max-diff-bytes",
+                "10",
+                "--PROMPT",
+                "Review code.",
+                "--dry-run",
+            ]
+
+            with redirect_stdout(stdout):
+                exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(payload["meta"]["git_diff"]["truncated"])
+            self.assertIn("Git Diff Snapshot (truncated)", payload["meta"]["prompt"])
+            self.assertIn("- src.py", payload["meta"]["prompt"])
+            self.assertIn("exceeding --max-diff-bytes", " ".join(payload["meta"]["warnings"]))
+
     def test_main_wraps_agy_stdout_as_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stdout = StringIO()
@@ -144,6 +221,7 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertEqual(payload["meta"]["cli"], "agy")
             self.assertEqual(payload["meta"]["model"], "Gemini 3.1 Pro (Low)")
             self.assertEqual(payload["meta"]["model_source"], "default")
+            self.assertIn("5m0s", payload["meta"]["command"])
 
     def test_main_uses_review_plan_default_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,6 +251,90 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertEqual(payload["meta"]["model"], "Claude Sonnet 4.6 (Thinking)")
             self.assertEqual(payload["meta"]["model_source"], "default")
             self.assertIn("Claude Sonnet 4.6 (Thinking)", payload["meta"]["command"])
+            self.assertIn("15m0s", payload["meta"]["command"])
+
+    def test_preflight_failure_skips_review_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--no-include-git-diff",
+                "--PROMPT",
+                "Review code.",
+                "--test-command",
+                "pytest tests",
+            ]
+
+            with mock.patch.object(bridge, "run_command", return_value=(1, "", "authentication failed or timed out")) as mock_run:
+                with mock.patch("subprocess.run") as mock_subprocess_run:
+                    with redirect_stdout(stdout):
+                        exit_code = bridge.main(argv)
+
+            mock_subprocess_run.assert_not_called()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(payload["success"])
+            self.assertIn("preflight failed", payload["error"])
+            self.assertIn("sign in", payload["error"])
+            mock_run.assert_called_once()
+
+    def test_fallback_model_retries_non_auth_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--no-preflight",
+                "--no-include-git-diff",
+                "--PROMPT",
+                "Review code.",
+            ]
+
+            with mock.patch.object(
+                bridge,
+                "run_command",
+                side_effect=[(1, "", "timeout waiting for response"), (0, "ok", "")],
+            ) as mock_run:
+                with redirect_stdout(stdout):
+                    exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["meta"]["model"], "Gemini 3.1 Pro (High)")
+            self.assertTrue(payload["meta"]["fallback"]["attempted"])
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_fallback_model_does_not_retry_auth_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--no-preflight",
+                "--no-include-git-diff",
+                "--PROMPT",
+                "Review code.",
+            ]
+
+            with mock.patch.object(bridge, "run_command", return_value=(1, "", "authentication failed or timed out")) as mock_run:
+                with redirect_stdout(stdout):
+                    exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(payload["success"])
+            self.assertNotIn("fallback", payload["meta"])
+            self.assertIn("sign in", payload["error"])
+            self.assertEqual(mock_run.call_count, 1)
 
     def test_explicit_model_overrides_mode_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
