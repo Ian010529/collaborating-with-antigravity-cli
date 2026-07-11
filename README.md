@@ -15,9 +15,9 @@
 5. 需要验证时传 `--test-command`；bridge 在本地执行测试，并把输出交给 `agy` 分析。
 6. 任务结束后用 `--cleanup archive` 留痕，或 `--cleanup delete` 删除状态。
 
-`review-code` 默认会先做 30 秒 `agy` 健康检查，把 bounded `git diff` 快照交给 `agy`，并在非认证类超时时用 `Gemini 3.1 Pro (High)` 重试一次。
+`review-code` 默认会先做 `agy` 健康检查，使用 `15m0s` print timeout，把 bounded `git diff` 快照交给 `agy`，并在非认证类超时时用 `Gemini 3.1 Pro (High)` 重试一次。
 
-`.codex-antigravity/` 默认被 `.gitignore` 排除，不应提交敏感上下文或 transcript。
+`.codex-antigravity/` 默认被 `.gitignore` 排除，不应提交敏感上下文或 transcript。保持 handoff 文件简洁，不要把完整 transcript 当作下一轮上下文。
 
 ## 安装
 
@@ -51,7 +51,7 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-有用参数：`--response-budget standard|compact|none`、`--max-context-bytes`、`--write-transcript`、`--stream-status`、`--cleanup keep|archive|delete`。
+有用参数：`--model`、`--fallback-model`、`--file`、`--state-dir`、`--context-file`、`--write-output`、`--write-transcript`、`--max-context-bytes`、`--max-diff-bytes`、`--response-budget standard|compact|none`、`--no-preflight`、`--no-include-git-diff`、`--stream-status`、`--cleanup keep|archive|delete`。
 
 超时/认证排查：
 

@@ -15,9 +15,9 @@ Migrated from [`collaborating-with-gemini-cli`](https://github.com/ZhenHuangLab/
 5. For validation, pass `--test-command`; the bridge runs tests locally and gives the output to `agy` for analysis.
 6. After the task, use `--cleanup archive` to keep an audit trail or `--cleanup delete` to remove state.
 
-`review-code` now runs a 30-second `agy` health check, sends a bounded `git diff` snapshot to `agy`, and retries once with `Gemini 3.1 Pro (High)` after non-authentication timeouts.
+`review-code` now runs an `agy` health check, uses a `15m0s` print timeout, sends a bounded `git diff` snapshot to `agy`, and retries once with `Gemini 3.1 Pro (High)` after non-authentication timeouts.
 
-`.codex-antigravity/` is ignored by git by default. Do not commit sensitive context or transcripts.
+`.codex-antigravity/` is ignored by git by default. Do not commit sensitive context or transcripts. Keep handoff files concise; do not pass full transcripts back as the next context.
 
 ## Install
 
@@ -51,7 +51,7 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-Useful flags: `--response-budget standard|compact|none`, `--max-context-bytes`, `--write-transcript`, `--stream-status`, `--cleanup keep|archive|delete`.
+Useful flags: `--model`, `--fallback-model`, `--file`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--no-preflight`, `--no-include-git-diff`, `--stream-status`, `--cleanup keep|archive|delete`.
 
 Timeout/auth check:
 
