@@ -396,6 +396,44 @@ class AgyCliBridgeTests(unittest.TestCase):
         self.assertNotIn("client_id=abc", redacted)
         self.assertNotIn("superSecretOAuthCodeValue", redacted)
 
+    def test_open_auth_url_uses_single_chrome_open_call(self) -> None:
+        mock_res = mock.MagicMock()
+        mock_res.returncode = 0
+
+        with mock.patch.object(bridge.sys, "platform", "darwin"):
+            with mock.patch.dict(bridge.os.environ, {"AGY_AUTH_BROWSER": "Google Chrome"}):
+                with mock.patch.object(bridge.subprocess, "run", return_value=mock_res) as mock_run:
+                    opened = bridge.open_auth_url("https://accounts.google.com/o/oauth2/auth?client_id=abc")
+
+        self.assertTrue(opened)
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["open", "-a", "Google Chrome", "https://accounts.google.com/o/oauth2/auth?client_id=abc"],
+        )
+
+    def test_read_clipboard_authorization_code_uses_copied_callback(self) -> None:
+        callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"
+
+        with mock.patch.object(bridge.sys, "platform", "darwin"):
+            with mock.patch.object(bridge, "run_local_command", return_value=(0, callback, "")):
+                code, source = bridge.read_clipboard_authorization_code()
+
+        self.assertEqual(code, "4/copiedCodeValue1234567890")
+        self.assertEqual(source, "clipboard")
+
+    def test_browser_authorization_prefers_clipboard_when_enabled(self) -> None:
+        callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"
+
+        with mock.patch.object(bridge.sys, "platform", "darwin"):
+            with mock.patch.object(bridge, "run_local_command", return_value=(0, callback, "")):
+                with mock.patch.object(bridge, "read_browser_tabs_text") as mock_tabs:
+                    code, source = bridge.read_browser_authorization_code(use_clipboard=True)
+
+        self.assertEqual(code, "4/copiedCodeValue1234567890")
+        self.assertEqual(source, "clipboard")
+        mock_tabs.assert_not_called()
+
     def test_auth_retries_default_to_one_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(

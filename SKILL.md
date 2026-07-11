@@ -30,12 +30,12 @@ Before long reviews, verify authentication with:
 agy --print-timeout 30s --print "Reply with exactly: ok"
 ```
 
-On macOS, the bridge enables `--auto-browser-auth` by default. It opens OAuth URLs in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; set `AGY_AUTH_BROWSER` to another browser app name only when needed. Changing the macOS system default browser may require a GUI confirmation, so do not assume it can be completed silently. During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
+On macOS, the bridge enables `--auto-browser-auth` by default. It opens each OAuth URL once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; set `AGY_AUTH_BROWSER` to another browser app name only when needed. Changing the macOS system default browser may require a GUI confirmation, so do not assume it can be completed silently. During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
 
 1. open the OAuth URL in Chrome when it can parse one;
 2. poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text for an OAuth `code`;
 3. detect codes embedded in callback-page links such as `?code=...`, including HTML-escaped relative URLs;
-4. if the user or page's "Copy to Clipboard" button places the code on the clipboard, read it before attempting any page-copy fallback;
+4. while the OAuth prompt is active, keep polling the clipboard so the page's "Copy to Clipboard" button can be read even when `agy` prints no further output;
 5. if browser JavaScript access is disabled, briefly copy visible front-browser page text via clipboard, then restore the previous clipboard;
 6. submit the code to `agy` through the PTY without writing it to disk.
 

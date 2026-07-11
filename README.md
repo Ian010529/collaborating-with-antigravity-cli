@@ -51,14 +51,14 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 
 ## OAuth 登录处理
 
-macOS 默认启用 `--auto-browser-auth`。bridge 会优先用 Chrome 打开 OAuth URL（默认 `AGY_AUTH_BROWSER="Google Chrome"`），而不是依赖系统默认浏览器；需要时可把 `AGY_AUTH_BROWSER` 改成其他浏览器应用名。默认 `--auth-retries 1`，只尝试一次登录，避免在用户未操作时频繁弹出新登录页；只有用户正在主动完成登录并接受重复打开新 OAuth URL 时才提高，例如 `--auth-retries 5`。
+macOS 默认启用 `--auto-browser-auth`。bridge 会优先用 Chrome 打开 OAuth URL（默认 `AGY_AUTH_BROWSER="Google Chrome"`），而不是依赖系统默认浏览器；每个 OAuth URL 只发起一次浏览器打开，避免 AppleScript/open fallback 造成重复登录页。需要时可把 `AGY_AUTH_BROWSER` 改成其他浏览器应用名。默认 `--auth-retries 1`，只尝试一次登录，避免在用户未操作时频繁弹出新登录页；只有用户正在主动完成登录并接受重复打开新 OAuth URL 时才提高，例如 `--auth-retries 5`。
 
 在 PTY 运行中，如果 `agy` 打印 OAuth URL 或要求输入 authorization code，bridge 会在内存中处理 code，不创建 `auth-code` 文件，也不会把 OAuth URL 或一次性 code 原样写入 JSON/transcript。它会：
 
 - 解析 `agy` 输出里的 OAuth URL，并用 Chrome 打开。
 - 轮询 Chrome，随后检查 Edge/Chromium/Safari 的 tab URL 和可读页面文本。
 - 从 callback 页面里的 `?code=...`、HTML 转义链接里的 `code`、可见页面文本或剪贴板内容中提取 code。
-- 优先读取用户点击页面 `Copy to Clipboard` 后进入剪贴板的 code；必要时短暂复制前台浏览器页面文本，再恢复原剪贴板。
+- OAuth prompt 活跃期间持续轮询剪贴板，因此用户点击页面 `Copy to Clipboard` 后，即使 `agy` 没有继续输出也能读到 code；必要时短暂复制前台浏览器页面文本，再恢复原剪贴板。
 - 通过 PTY 把 code 写回 `agy`，不落盘。
 
 如果 Chrome 报 “Executing JavaScript through AppleScript is turned off”，或 macOS 没给 `osascript`/终端/Codex Accessibility 权限，bridge 不能自动读取页面或点击复制按钮。处理方式：在 Chrome 的 View > Developer 中开启 “Allow JavaScript from Apple Events”，给控制它的终端或 Codex 授权 Accessibility，或手动点击页面的 Copy 按钮；bridge 会在 OAuth prompt 活跃时读取剪贴板并提交。可用 `AGY_BROWSER_AUTH_CLIPBOARD=0` 关闭剪贴板 fallback，或用 `--no-auto-browser-auth` 关闭所有浏览器 code 提取。

@@ -51,14 +51,14 @@ Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` aft
 
 ## OAuth Handling
 
-On macOS, `--auto-browser-auth` is enabled by default. The bridge opens OAuth URLs in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; set `AGY_AUTH_BROWSER` to another browser app name only when needed. It defaults to `--auth-retries 1`, so it tries login once and avoids repeatedly opening fresh login pages while the user is not acting; increase it, for example to `--auth-retries 5`, only when the user is actively completing browser login.
+On macOS, `--auto-browser-auth` is enabled by default. The bridge opens OAuth URLs in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; each OAuth URL is opened once to avoid duplicate login pages from AppleScript/open fallback paths. Set `AGY_AUTH_BROWSER` to another browser app name only when needed. It defaults to `--auth-retries 1`, so it tries login once and avoids repeatedly opening fresh login pages while the user is not acting; increase it, for example to `--auth-retries 5`, only when the user is actively completing browser login.
 
 During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge handles the code in memory. It does not create an `auth-code` file, and OAuth URLs or one-time codes are redacted from JSON output and transcripts. It will:
 
 - Parse the OAuth URL from `agy` output and open it in Chrome.
 - Poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text.
 - Extract codes from callback-page `?code=...` URLs, HTML-escaped links, visible page text, or clipboard content.
-- Prefer codes placed on the clipboard by the page's `Copy to Clipboard` button; if needed, briefly copy front-browser page text and restore the previous clipboard.
+- Keep polling the clipboard while the OAuth prompt is active, so the page's `Copy to Clipboard` button can be read even when `agy` prints no further output; if needed, briefly copy front-browser page text and restore the previous clipboard.
 - Submit the code back to `agy` through the PTY without writing it to disk.
 
 If Chrome reports "Executing JavaScript through AppleScript is turned off", or macOS denies Accessibility to `osascript`/Terminal/Codex, the bridge cannot automatically read the page or click copy controls. Fix it by enabling Chrome View > Developer > Allow JavaScript from Apple Events, granting Accessibility to the controlling terminal or Codex, or manually clicking the page's Copy button while the bridge waits; it will read the clipboard while the OAuth prompt is active. Set `AGY_BROWSER_AUTH_CLIPBOARD=0` to disable the clipboard fallback, or pass `--no-auto-browser-auth` to disable all browser code extraction.

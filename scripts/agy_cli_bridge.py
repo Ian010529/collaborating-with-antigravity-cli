@@ -252,6 +252,7 @@ def run_command_pty(
     last_status = started
     oauth_value_sent = False
     auth_url_opened = False
+    oauth_prompt_seen = False
     last_browser_poll = 0.0
     last_clipboard_poll = 0.0
     try:
@@ -317,21 +318,20 @@ def run_command_pty(
                         and auto_browser_auth
                         and _looks_like_oauth_prompt(text_so_far)
                     ):
-                        code = ""
-                        now = time.monotonic()
-                        if now - last_browser_poll >= 1.0:
-                            code, _ = read_browser_authorization_code(
-                                use_clipboard=False
-                            )
-                            last_browser_poll = now
-                        if not code and now - last_clipboard_poll >= 3.0:
-                            code, _ = read_browser_authorization_code(
-                                use_clipboard=True
-                            )
-                            last_clipboard_poll = now
-                        if code:
-                            os.write(master_fd, f"{code}\n".encode("utf-8"))
-                            oauth_value_sent = True
+                        oauth_prompt_seen = True
+
+            if not oauth_value_sent and auto_browser_auth and oauth_prompt_seen:
+                code = ""
+                now = time.monotonic()
+                if now - last_clipboard_poll >= 0.75:
+                    code, _ = read_clipboard_authorization_code()
+                    last_clipboard_poll = now
+                if not code and now - last_browser_poll >= 2.0:
+                    code, _ = read_browser_authorization_code(use_clipboard=True)
+                    last_browser_poll = now
+                if code:
+                    os.write(master_fd, f"{code}\n".encode("utf-8"))
+                    oauth_value_sent = True
 
             if process.poll() is not None:
                 while True:
@@ -401,30 +401,30 @@ def preferred_auth_browser() -> str:
 
 
 def open_auth_url(url: str) -> bool:
-    """Open the OAuth URL in the preferred browser; best effort only."""
+    """Open the OAuth URL in the preferred browser; best effort only.
+
+    Use a single `open` invocation per OAuth URL. AppleScript can sometimes
+    return failure after opening a tab, and a second fallback open creates a
+    duplicate login page.
+    """
     if not url or sys.platform != "darwin":
         return False
     preferred = preferred_auth_browser()
-    if preferred and open_url_in_browser_app(preferred, url):
-        return True
-    commands: list[list[str]] = []
     if preferred:
-        commands.append(["open", "-a", preferred, url])
-    commands.append(["open", url])
+        command = ["open", "-a", preferred, url]
+    else:
+        command = ["open", url]
     try:
-        for command in commands:
-            result = subprocess.run(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-                check=False,
-            )
-            if result.returncode == 0:
-                return True
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
     except Exception:
         return False
-    return False
+    return result.returncode == 0
 
 
 def open_url_in_browser_app(app_name: str, url: str) -> bool:
@@ -474,6 +474,10 @@ def read_browser_authorization_code(*, use_clipboard: bool) -> tuple[str, str]:
     """Best-effort extraction of an OAuth code from browser tabs on macOS."""
     if sys.platform != "darwin":
         return "", ""
+    if use_clipboard:
+        code, source = read_clipboard_authorization_code()
+        if code:
+            return code, source
     preferred = preferred_auth_browser()
     app_names = [preferred, *BROWSER_APPS] if preferred else list(BROWSER_APPS)
     seen: set[str] = set()
@@ -486,14 +490,21 @@ def read_browser_authorization_code(*, use_clipboard: bool) -> tuple[str, str]:
         if code:
             return code, f"{app_name}:tabs"
     if use_clipboard and os.getenv("AGY_BROWSER_AUTH_CLIPBOARD", "1") != "0":
-        clipboard_text = run_local_command(["pbpaste"], Path.cwd())[1]
-        code = extract_authorization_code(clipboard_text)
-        if code:
-            return code, "clipboard"
         text, source = read_front_browser_text_via_clipboard()
         code = extract_authorization_code(text)
         if code:
             return code, source
+    return "", ""
+
+
+def read_clipboard_authorization_code() -> tuple[str, str]:
+    """Read an OAuth code that the user copied from the browser page."""
+    if sys.platform != "darwin" or os.getenv("AGY_BROWSER_AUTH_CLIPBOARD", "1") == "0":
+        return "", ""
+    clipboard_text = run_local_command(["pbpaste"], Path.cwd())[1]
+    code = extract_authorization_code(clipboard_text)
+    if code:
+        return code, "clipboard"
     return "", ""
 
 
