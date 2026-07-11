@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -43,6 +44,28 @@ def init_clean_repo(root: Path) -> None:
     (root / "src.py").write_text("print('original')\n", encoding="utf-8")
     run_git(root, ["add", "README.md", "src.py"])
     run_git(root, ["commit", "-m", "initial"])
+
+
+def read_clipboard_text() -> str:
+    return subprocess.run(
+        ["pbpaste"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ).stdout
+
+
+def write_clipboard_text(text: str) -> None:
+    subprocess.run(
+        ["pbcopy"],
+        input=text,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
 
 class AgyCliBridgeTests(unittest.TestCase):
@@ -463,15 +486,10 @@ class AgyCliBridgeTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "requires macOS clipboard and PTY behavior")
     def test_pty_oauth_url_alone_triggers_clipboard_polling(self) -> None:
-        old_clipboard = subprocess.run(
-            ["pbpaste"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ).stdout
+        old_clipboard = read_clipboard_text()
         callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"
         try:
-            subprocess.run(["pbcopy"], input="", text=True, check=False)
+            write_clipboard_text("")
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 fake_agy = root / "fake_agy.py"
@@ -491,7 +509,7 @@ class AgyCliBridgeTests(unittest.TestCase):
 
                 timer = threading.Timer(
                     1.0,
-                    lambda: subprocess.run(["pbcopy"], input=callback, text=True, check=False),
+                    lambda: write_clipboard_text(callback),
                 )
                 timer.start()
                 stdout = StringIO()
@@ -520,7 +538,86 @@ class AgyCliBridgeTests(unittest.TestCase):
                 self.assertIn("RECEIVED_CODE=4/<redacted>", payload["agent_messages"])
                 self.assertFalse(payload["meta"]["open_auth_url"])
         finally:
-            subprocess.run(["pbcopy"], input=old_clipboard, text=True, check=False)
+            write_clipboard_text(old_clipboard)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS clipboard and PTY behavior")
+    def test_bridge_does_not_duplicate_agy_browser_open_by_default(self) -> None:
+        old_clipboard = read_clipboard_text()
+        callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"
+        try:
+            write_clipboard_text("")
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                open_log = root / "open.log"
+                fake_open = bin_dir / "open"
+                fake_open.write_text(
+                    "\n".join(
+                        [
+                            "#!/usr/bin/env python3",
+                            "import pathlib, sys",
+                            f"pathlib.Path({str(open_log)!r}).open('a', encoding='utf-8').write('OPEN ' + ' '.join(sys.argv[1:]) + '\\n')",
+                            "raise SystemExit(0)",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                fake_open.chmod(fake_open.stat().st_mode | stat.S_IXUSR)
+
+                fake_agy = root / "fake_agy.py"
+                fake_agy.write_text(
+                    "\n".join(
+                        [
+                            "#!/usr/bin/env python3",
+                            "import subprocess, sys",
+                            "url = 'https://accounts.google.com/o/oauth2/auth?client_id=fake'",
+                            "subprocess.run(['open', url], check=False)",
+                            "print('Open this URL:', url, flush=True)",
+                            "code = sys.stdin.readline().strip()",
+                            "print(f'RECEIVED_CODE={code}', flush=True)",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                fake_agy.chmod(fake_agy.stat().st_mode | stat.S_IXUSR)
+
+                timer = threading.Timer(
+                    1.0,
+                    lambda: write_clipboard_text(callback),
+                )
+                timer.start()
+                stdout = StringIO()
+                argv = [
+                    "--agy-bin",
+                    str(fake_agy),
+                    "--cd",
+                    tmp,
+                    "--mode",
+                    "ask",
+                    "--PROMPT",
+                    "Simulate OAuth duplicate-open behavior.",
+                    "--timeout-s",
+                    "10",
+                    "--no-stream-status",
+                ]
+                old_path = bridge.os.environ.get("PATH", "")
+                try:
+                    with mock.patch.dict(bridge.os.environ, {"PATH": str(bin_dir) + os.pathsep + old_path}):
+                        with redirect_stdout(stdout):
+                            exit_code = bridge.main(argv)
+                finally:
+                    timer.cancel()
+
+                payload = json.loads(stdout.getvalue())
+                open_lines = open_log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(exit_code, 0)
+                self.assertTrue(payload["success"])
+                self.assertFalse(payload["meta"]["open_auth_url"])
+                self.assertEqual(len(open_lines), 1)
+                self.assertIn("RECEIVED_CODE=4/<redacted>", payload["agent_messages"])
+        finally:
+            write_clipboard_text(old_clipboard)
 
     def test_auth_retries_default_to_one_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
