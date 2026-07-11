@@ -125,7 +125,7 @@ class AgyCliBridgeTests(unittest.TestCase):
 
     def test_default_model_for_mode(self) -> None:
         self.assertEqual(bridge.default_model_for_mode("review-plan"), "Gemini 3.1 Pro (High)")
-        self.assertEqual(bridge.default_model_for_mode("review-code"), "Claude Sonnet 4.6 (Thinking)")
+        self.assertEqual(bridge.default_model_for_mode("review-code"), "Gemini 3.1 Pro (High)")
         self.assertEqual(bridge.default_model_for_mode("ask"), "Gemini 3.1 Pro (Low)")
 
     def test_default_print_timeout_for_mode(self) -> None:
@@ -248,10 +248,13 @@ class AgyCliBridgeTests(unittest.TestCase):
 
             payload = json.loads(stdout.getvalue())
             self.assertEqual(exit_code, 0)
-            self.assertEqual(payload["meta"]["model"], "Claude Sonnet 4.6 (Thinking)")
+            self.assertEqual(payload["meta"]["model"], "Gemini 3.1 Pro (High)")
             self.assertEqual(payload["meta"]["model_source"], "default")
-            self.assertIn("Claude Sonnet 4.6 (Thinking)", payload["meta"]["command"])
+            self.assertIn("Gemini 3.1 Pro (High)", payload["meta"]["command"])
             self.assertIn("15m0s", payload["meta"]["command"])
+            self.assertEqual(payload["meta"]["auth_retries"], 1)
+            self.assertEqual(payload["meta"]["use_pty"], bridge.os.name != "nt")
+            self.assertEqual(payload["meta"]["auto_browser_auth"], bridge.sys.platform == "darwin")
 
     def test_preflight_failure_skips_review_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,6 +295,8 @@ class AgyCliBridgeTests(unittest.TestCase):
                 "review-code",
                 "--no-preflight",
                 "--no-include-git-diff",
+                "--model",
+                "Claude Sonnet 4.6 (Thinking)",
                 "--PROMPT",
                 "Review code.",
             ]
@@ -335,6 +340,53 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertNotIn("fallback", payload["meta"])
             self.assertIn("sign in", payload["error"])
             self.assertEqual(mock_run.call_count, 1)
+
+    def test_extract_authorization_code_from_callback_url_and_html(self) -> None:
+        direct = "https://antigravity.google/callback?state=x&code=4/abcDEFghiJKLmnopQRSTuvwxYZ1234567890"
+        escaped = "/callback?state=x&amp;code=4/htmlEscapedCodeValue1234567890"
+
+        self.assertEqual(
+            bridge.extract_authorization_code(direct),
+            "4/abcDEFghiJKLmnopQRSTuvwxYZ1234567890",
+        )
+        self.assertEqual(
+            bridge.extract_authorization_code(escaped),
+            "4/htmlEscapedCodeValue1234567890",
+        )
+
+    def test_redact_auth_material_hides_urls_and_codes(self) -> None:
+        text = (
+            "Open https://accounts.google.com/o/oauth2/auth?client_id=abc&state=secret "
+            "then paste 4/superSecretOAuthCodeValue1234567890."
+        )
+
+        redacted = bridge.redact_auth_material(text)
+
+        self.assertIn(bridge.REDACTED_AUTH_URL, redacted)
+        self.assertIn(bridge.REDACTED_OAUTH_CODE, redacted)
+        self.assertNotIn("client_id=abc", redacted)
+        self.assertNotIn("superSecretOAuthCodeValue", redacted)
+
+    def test_auth_retries_default_to_one_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                bridge,
+                "run_command",
+                return_value=(1, "", "authentication required"),
+            ) as mock_run:
+                rc, stdout, stderr, attempts = bridge.run_command_with_auth_retries(
+                    ["agy", "--print", "hi"],
+                    timeout_s=1,
+                    cwd=Path(tmp),
+                    auto_browser_auth=True,
+                    auth_retries=1,
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("authentication", stderr)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(mock_run.call_count, 1)
 
     def test_explicit_model_overrides_mode_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

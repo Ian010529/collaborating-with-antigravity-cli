@@ -15,7 +15,7 @@ Migrated from [`collaborating-with-gemini-cli`](https://github.com/ZhenHuangLab/
 5. For validation, pass `--test-command`; the bridge runs tests locally and gives the output to `agy` for analysis.
 6. After the task, use `--cleanup archive` to keep an audit trail or `--cleanup delete` to remove state.
 
-`review-code` now runs an `agy` login/health check, uses a `15m0s` print timeout, sends a bounded `git diff` snapshot to `agy`, and retries once with `Gemini 3.1 Pro (High)` after non-authentication timeouts.
+`review-code` now runs an `agy` login/health check with PTY execution, uses a `15m0s` print timeout, and sends a bounded `git diff` snapshot to `agy`. If you explicitly choose another primary model, non-authentication timeouts can fall back to `Gemini 3.1 Pro (High)`.
 
 `.codex-antigravity/` is ignored by git by default. Do not commit sensitive context or transcripts. Keep handoff files concise; do not pass full transcripts back as the next context.
 
@@ -32,7 +32,7 @@ Restart or refresh Codex Desktop App, then mention `collaborating-with-antigravi
 ## Default Models
 
 - `review-plan`: `Gemini 3.1 Pro (High)`
-- `review-code`: `Claude Sonnet 4.6 (Thinking)`
+- `review-code`: `Gemini 3.1 Pro (High)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 
 Override with `--model`. `review-code` defaults to `Gemini 3.1 Pro (High)` as its fallback model, and only retries after non-authentication timeouts. Use Flash for quick checks; do not default to Opus unless the task is unusually complex.
@@ -40,13 +40,28 @@ Override with `--model`. `review-code` defaults to `Gemini 3.1 Pro (High)` as it
 ## Default Behavior
 
 - `review-plan` and `ask` default to `--print-timeout 5m0s`; `review-code` defaults to `15m0s`; the outer process timeout defaults to `--timeout-s 1800`.
-- `review-code` enables `--preflight` by default and first runs `agy --print-timeout 30s --print "Reply with exactly: ok"`. If login is missing, expired, or otherwise unhealthy, the bridge skips the longer review and tells you to run `agy` directly to sign in.
+- POSIX systems enable `--pty` by default, so print-mode authentication/session behavior is closer to interactive `agy`. Use `--no-pty` only when PTY output is demonstrably broken.
+- `review-code` enables `--preflight` by default and first runs `agy --print-timeout 30s --print "Reply with exactly: ok"`. If login is missing, expired, or otherwise unhealthy, the bridge skips the longer review and tells you to run `agy` directly to sign in; a non-PTY authentication failure is retried once with PTY.
 - `review-code` includes the current tracked `git diff` by default. If the diff is under `--max-diff-bytes` (default 120000), it sends the full diff; larger diffs are reduced to diff stat and file list.
 - When no explicit `--file` is provided, the bridge auto-extracts in-repo file paths from `--PROMPT`, capped by `--max-files 5`; it only warns when focus files exceed `--max-focus-bytes 200000`.
 - `--context-file` is repeatable and has a default combined cap of `--max-context-bytes 50000`. Missing files or over-limit context block the run.
 - `--test-command` runs locally in the working directory and sends actual test output to `agy`. Prefer using it from a clean worktree because test commands can create files.
 - The bridge always prints JSON with `success`, `agent_messages`, and `meta`, plus `error` on failure. `--dry-run` builds the prompt/command and returns JSON without calling `agy`.
 - Relative `--write-output` paths are written under `--state-dir`; `--write-transcript` writes to `transcripts/` and updates `state.json` with the latest 100 runs.
+
+## OAuth Handling
+
+On macOS, `--auto-browser-auth` is enabled by default. The bridge opens OAuth URLs in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; set `AGY_AUTH_BROWSER` to another browser app name only when needed. It defaults to `--auth-retries 1`, so it tries login once and avoids repeatedly opening fresh login pages while the user is not acting; increase it, for example to `--auth-retries 5`, only when the user is actively completing browser login.
+
+During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge handles the code in memory. It does not create an `auth-code` file, and OAuth URLs or one-time codes are redacted from JSON output and transcripts. It will:
+
+- Parse the OAuth URL from `agy` output and open it in Chrome.
+- Poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text.
+- Extract codes from callback-page `?code=...` URLs, HTML-escaped links, visible page text, or clipboard content.
+- Prefer codes placed on the clipboard by the page's `Copy to Clipboard` button; if needed, briefly copy front-browser page text and restore the previous clipboard.
+- Submit the code back to `agy` through the PTY without writing it to disk.
+
+If Chrome reports "Executing JavaScript through AppleScript is turned off", or macOS denies Accessibility to `osascript`/Terminal/Codex, the bridge cannot automatically read the page or click copy controls. Fix it by enabling Chrome View > Developer > Allow JavaScript from Apple Events, granting Accessibility to the controlling terminal or Codex, or manually clicking the page's Copy button while the bridge waits; it will read the clipboard while the OAuth prompt is active. Set `AGY_BROWSER_AUTH_CLIPBOARD=0` to disable the clipboard fallback, or pass `--no-auto-browser-auth` to disable all browser code extraction.
 
 ## Common Commands
 
@@ -62,7 +77,7 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-Useful flags: `--agy-bin`, `--model`, `--print-timeout`, `--timeout-s`, `--fallback-model`, `--file`, `--add-dir`, `--test-command`, `--conversation`, `--continue`, `--sandbox`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--run-id`, `--dry-run`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--no-preflight`, `--no-include-git-diff`, `--no-auto-extract-files`, `--stream-status`, `--no-stream-status`, `--cleanup keep|archive|delete`.
+Useful flags: `--agy-bin`, `--model`, `--print-timeout`, `--timeout-s`, `--fallback-model`, `--file`, `--add-dir`, `--test-command`, `--conversation`, `--continue`, `--sandbox`, `--pty`, `--no-pty`, `--auto-browser-auth`, `--no-auto-browser-auth`, `--auth-retries`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--run-id`, `--dry-run`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--no-preflight`, `--no-include-git-diff`, `--no-auto-extract-files`, `--stream-status`, `--no-stream-status`, `--cleanup keep|archive|delete`.
 
 Login/auth check:
 
@@ -70,9 +85,9 @@ Login/auth check:
 agy --print-timeout 30s --print "Reply with exactly: ok"
 ```
 
-If authentication fails, run `agy` directly and sign in, then repeat the health check above. The bridge recognizes `authentication failed`, `please sign in`, `not signed in`, `sign in to`, `login required`, and related auth failures so they are not mistaken for ordinary fallback-eligible timeouts.
+If authentication fails, run `agy` directly and sign in, then repeat the health check above. The bridge recognizes `authentication failed`, `please sign in`, `not signed in`, `sign in to`, `login required`, `authentication required`, `authentication timed out`, `authorization code`, and related auth failures so they are not mistaken for ordinary fallback-eligible timeouts. On `Ctrl-C`, the bridge exits cleanly with a JSON error and status 130.
 
-Reliability flags: `--print-timeout`, `--preflight-timeout`, `--no-preflight`, `--no-include-git-diff`, `--max-diff-bytes`, `--fallback-model`, `--stream-status-interval-s`.
+Reliability flags: `--print-timeout`, `--preflight-timeout`, `--no-preflight`, `--no-include-git-diff`, `--max-diff-bytes`, `--fallback-model`, `--stream-status-interval-s`, `--no-pty`, `--no-auto-browser-auth`.
 
 ## Local Tests
 

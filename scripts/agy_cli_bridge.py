@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Antigravity CLI bridge for Codex skills.
 
@@ -11,11 +12,15 @@ import argparse
 import datetime as dt
 import json
 import os
+import pty
 import re
+import select
+import html
 import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +33,7 @@ DEFAULT_STATE_DIR = ".codex-antigravity"
 DEFAULT_MAX_CONTEXT_BYTES = 50_000
 DEFAULT_MAX_DIFF_BYTES = 120_000
 DEFAULT_REVIEW_PLAN_MODEL = "Gemini 3.1 Pro (High)"
-DEFAULT_REVIEW_CODE_MODEL = "Claude Sonnet 4.6 (Thinking)"
+DEFAULT_REVIEW_CODE_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_REVIEW_CODE_FALLBACK_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_QUICK_MODEL = "Gemini 3.1 Pro (Low)"
 MODE_DEFAULT_MODELS = {
@@ -83,6 +88,21 @@ PATH_RE = re.compile(
     """,
     re.VERBOSE,
 )
+AUTH_URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/auth\?[^\s'\"<>]+")
+AUTH_MATERIAL_URL_RE = re.compile(
+    r"https://(?:accounts\.google\.com|antigravity\.google)/(?:[^\s'\"<>]|&amp;)+"
+)
+OAUTH_CODE_RE = re.compile(r"\b4/[A-Za-z0-9._~+\-/=]{20,}\b")
+REDACTED_AUTH_URL = "https://<oauth-url-redacted>"
+REDACTED_OAUTH_CODE = "4/<redacted>"
+BROWSER_APPS = (
+    "Google Chrome",
+    "Google Chrome Canary",
+    "Chromium",
+    "Microsoft Edge",
+    "Safari",
+)
+DEFAULT_AUTH_BROWSER = "Google Chrome"
 
 
 def configure_stdio() -> None:
@@ -108,10 +128,22 @@ def run_command(
     *,
     stream_status: bool = False,
     stream_status_interval_s: float = 30.0,
+    use_pty: bool = False,
+    auto_browser_auth: bool = False,
 ) -> tuple[int, str, str]:
     env = os.environ.copy()
     resolved_cmd = cmd.copy()
     resolved_cmd[0] = resolve_executable(resolved_cmd[0], env)
+    if use_pty and os.name != "nt":
+        return run_command_pty(
+            resolved_cmd,
+            timeout_s,
+            cwd,
+            env,
+            stream_status=stream_status,
+            stream_status_interval_s=stream_status_interval_s,
+            auto_browser_auth=auto_browser_auth,
+        )
     process = subprocess.Popen(
         resolved_cmd,
         stdin=subprocess.DEVNULL,
@@ -152,6 +184,445 @@ def run_command(
     return process.returncode, stdout, stderr
 
 
+def run_command_with_auth_retries(
+    cmd: list[str],
+    timeout_s: float | None,
+    cwd: Path,
+    *,
+    stream_status: bool = False,
+    stream_status_interval_s: float = 30.0,
+    use_pty: bool = False,
+    auto_browser_auth: bool = False,
+    auth_retries: int = 1,
+) -> tuple[int, str, str, list[dict[str, Any]]]:
+    """Run agy, retrying fresh OAuth attempts when agy's short auth window expires."""
+    max_attempts = max(1, auth_retries if auto_browser_auth else 1)
+    attempts: list[dict[str, Any]] = []
+    rc = 1
+    stdout = ""
+    stderr = ""
+    for attempt in range(1, max_attempts + 1):
+        rc, stdout, stderr = run_command(
+            cmd,
+            timeout_s=timeout_s,
+            cwd=cwd,
+            stream_status=stream_status,
+            stream_status_interval_s=stream_status_interval_s,
+            use_pty=use_pty,
+            auto_browser_auth=auto_browser_auth,
+        )
+        attempts.append(
+            {
+                "attempt": attempt,
+                "exit_code": rc,
+                "authentication_error": is_authentication_error(stdout, stderr),
+            }
+        )
+        if rc == 0 or not is_authentication_error(stdout, stderr) or attempt >= max_attempts:
+            break
+        print(
+            f"[agy-bridge] authentication did not complete; retrying OAuth attempt {attempt + 1}/{max_attempts}...",
+            file=sys.stderr,
+            flush=True,
+        )
+    return rc, stdout, stderr, attempts
+
+
+def run_command_pty(
+    cmd: list[str],
+    timeout_s: float | None,
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    stream_status: bool = False,
+    stream_status_interval_s: float = 30.0,
+    auto_browser_auth: bool = False,
+) -> tuple[int, str, str]:
+    """Run agy behind a pseudo-terminal.
+
+    Some agy authentication/session paths behave differently without a TTY.
+    The bridge still runs print-mode non-interactively, but a PTY lets agy reuse
+    the same auth state as an interactive terminal.
+    """
+    master_fd, slave_fd = pty.openpty()
+    process: subprocess.Popen[str] | None = None
+    output = bytearray()
+    started = time.monotonic()
+    last_status = started
+    oauth_value_sent = False
+    auth_url_opened = False
+    last_browser_poll = 0.0
+    last_clipboard_poll = 0.0
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+            env=env,
+            cwd=str(cwd),
+        )
+    finally:
+        os.close(slave_fd)
+
+    try:
+        while True:
+            elapsed = time.monotonic() - started
+            if timeout_s is not None and elapsed >= timeout_s:
+                process.kill()
+                process.wait()
+                text = output.decode("utf-8", errors="replace")
+                return 124, text, "[timeout] agy process timed out."
+
+            if (
+                stream_status
+                and time.monotonic() - last_status >= max(1.0, stream_status_interval_s)
+            ):
+                print(
+                    f"[agy-bridge] still running after {int(elapsed)}s...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                last_status = time.monotonic()
+
+            readable, _, _ = select.select([master_fd], [], [], 0.1)
+            if readable:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output.extend(chunk)
+                    text_so_far = output.decode("utf-8", errors="replace")
+                    if not auth_url_opened and auto_browser_auth:
+                        auth_url = extract_auth_url(text_so_far)
+                        if auth_url:
+                            if open_auth_url(auth_url):
+                                print(
+                                    "[agy-bridge] opened OAuth URL in browser.",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            else:
+                                print(
+                                    "[agy-bridge] could not open OAuth URL automatically.",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            auth_url_opened = True
+                    if (
+                        not oauth_value_sent
+                        and auto_browser_auth
+                        and _looks_like_oauth_prompt(text_so_far)
+                    ):
+                        code = ""
+                        now = time.monotonic()
+                        if now - last_browser_poll >= 1.0:
+                            code, _ = read_browser_authorization_code(
+                                use_clipboard=False
+                            )
+                            last_browser_poll = now
+                        if not code and now - last_clipboard_poll >= 3.0:
+                            code, _ = read_browser_authorization_code(
+                                use_clipboard=True
+                            )
+                            last_clipboard_poll = now
+                        if code:
+                            os.write(master_fd, f"{code}\n".encode("utf-8"))
+                            oauth_value_sent = True
+
+            if process.poll() is not None:
+                while True:
+                    readable, _, _ = select.select([master_fd], [], [], 0)
+                    if not readable:
+                        break
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                text = output.decode("utf-8", errors="replace")
+                return process.returncode or 0, normalize_pty_output(text), ""
+    finally:
+        os.close(master_fd)
+
+
+def normalize_pty_output(text: str) -> str:
+    """Normalize CRLF and strip common terminal control sequences from PTY output."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", normalized)
+
+
+def redact_auth_material(text: str) -> str:
+    """Redact one-time OAuth URLs/codes before returning JSON or writing transcripts."""
+    redacted = AUTH_MATERIAL_URL_RE.sub(REDACTED_AUTH_URL, text)
+    return OAUTH_CODE_RE.sub(REDACTED_OAUTH_CODE, redacted)
+
+
+def _looks_like_oauth_prompt(text: str) -> bool:
+    normalized = normalize_pty_output(text).lower()
+    return (
+        "paste the authorization code" in normalized
+        or "authorization code here" in normalized
+        or "waiting for authentication" in normalized
+    )
+
+
+def extract_auth_url(text: str) -> str:
+    """Extract the OAuth URL printed by agy, if present."""
+    match = AUTH_URL_RE.search(normalize_pty_output(text))
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,)")
+
+
+def extract_authorization_code(text: str) -> str:
+    """Extract an OAuth authorization code from URL or visible page text."""
+    normalized = html.unescape(urllib.parse.unquote(normalize_pty_output(text)))
+    for raw_url in re.findall(r"(?:https?://|/|\?)[^\s'\"<>]+", normalized):
+        parsed = urllib.parse.urlparse(raw_url.rstrip(".,)"))
+        query = urllib.parse.parse_qs(parsed.query)
+        for value in query.get("code", []):
+            if value:
+                return value.strip()
+    for value in re.findall(r"(?:^|[?&])code=([^&\s'\"<>]+)", normalized):
+        if value:
+            return urllib.parse.unquote(value).strip()
+    match = OAUTH_CODE_RE.search(normalized)
+    return match.group(0).strip() if match else ""
+
+
+def preferred_auth_browser() -> str:
+    return os.getenv("AGY_AUTH_BROWSER", DEFAULT_AUTH_BROWSER).strip()
+
+
+def open_auth_url(url: str) -> bool:
+    """Open the OAuth URL in the preferred browser; best effort only."""
+    if not url or sys.platform != "darwin":
+        return False
+    preferred = preferred_auth_browser()
+    if preferred and open_url_in_browser_app(preferred, url):
+        return True
+    commands: list[list[str]] = []
+    if preferred:
+        commands.append(["open", "-a", preferred, url])
+    commands.append(["open", url])
+    try:
+        for command in commands:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode == 0:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def open_url_in_browser_app(app_name: str, url: str) -> bool:
+    """Open a URL in a concrete macOS browser app, avoiding system-default routing."""
+    if not app_name or sys.platform != "darwin":
+        return False
+    quoted_app = app_name.replace('"', '\\"')
+    if app_name == "Safari":
+        script = f'''
+on run argv
+  set targetUrl to item 1 of argv
+  tell application "{quoted_app}"
+    activate
+    if (count of windows) = 0 then make new document
+    set URL of front document to targetUrl
+  end tell
+end run
+'''
+    else:
+        script = f'''
+on run argv
+  set targetUrl to item 1 of argv
+  tell application "{quoted_app}"
+    activate
+    if (count of windows) = 0 then make new window
+    tell front window
+      make new tab at end of tabs with properties {{URL:targetUrl}}
+      set active tab index to (count of tabs)
+    end tell
+  end tell
+end run
+'''
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script, url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def read_browser_authorization_code(*, use_clipboard: bool) -> tuple[str, str]:
+    """Best-effort extraction of an OAuth code from browser tabs on macOS."""
+    if sys.platform != "darwin":
+        return "", ""
+    preferred = preferred_auth_browser()
+    app_names = [preferred, *BROWSER_APPS] if preferred else list(BROWSER_APPS)
+    seen: set[str] = set()
+    for app_name in app_names:
+        if not app_name or app_name in seen:
+            continue
+        seen.add(app_name)
+        text = read_browser_tabs_text(app_name)
+        code = extract_authorization_code(text)
+        if code:
+            return code, f"{app_name}:tabs"
+    if use_clipboard and os.getenv("AGY_BROWSER_AUTH_CLIPBOARD", "1") != "0":
+        clipboard_text = run_local_command(["pbpaste"], Path.cwd())[1]
+        code = extract_authorization_code(clipboard_text)
+        if code:
+            return code, "clipboard"
+        text, source = read_front_browser_text_via_clipboard()
+        code = extract_authorization_code(text)
+        if code:
+            return code, source
+    return "", ""
+
+
+def read_browser_tabs_text(app_name: str) -> str:
+    """Read browser tab URLs/titles and, when allowed, DOM text."""
+    if app_name == "Safari":
+        script = r'''
+tell application "System Events"
+  if not (exists process "Safari") then return ""
+end tell
+tell application "Safari"
+  set out to ""
+  repeat with d in documents
+    try
+      set out to out & "URL: " & (URL of d as text) & linefeed
+      set out to out & "TITLE: " & (name of d as text) & linefeed
+      try
+        set out to out & "TEXT: " & (do JavaScript "document.body ? document.body.innerText : ''" in d) & linefeed
+      end try
+    end try
+  end repeat
+  return out
+end tell
+'''
+    else:
+        quoted = app_name.replace('"', '\\"')
+        script = f'''
+tell application "System Events"
+  if not (exists process "{quoted}") then return ""
+end tell
+tell application "{quoted}"
+  set out to ""
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        set out to out & "URL: " & (URL of t as text) & linefeed
+        set out to out & "TITLE: " & (title of t as text) & linefeed
+        try
+          set out to out & "TEXT: " & (execute t javascript "document.body ? document.body.innerText : ''") & linefeed
+        end try
+      end try
+    end repeat
+  end repeat
+  return out
+end tell
+'''
+    return run_osascript(script, timeout_s=4)
+
+
+def read_front_browser_text_via_clipboard() -> tuple[str, str]:
+    """Copy visible front browser page text, then restore the previous clipboard."""
+    app_name = front_browser_app()
+    if not app_name:
+        return "", ""
+    old_clipboard = run_local_command(["pbpaste"], Path.cwd())[1]
+    quoted_app = app_name.replace('"', '\\"')
+    script = f'''
+tell application "{quoted_app}" to activate
+delay 0.2
+tell application "System Events"
+  keystroke "a" using command down
+  delay 0.1
+  keystroke "c" using command down
+end tell
+delay 0.2
+'''
+    run_osascript(script, timeout_s=5)
+    copied = run_local_command(["pbpaste"], Path.cwd())[1]
+    try:
+        subprocess.run(
+            ["pbcopy"],
+            input=old_clipboard,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        pass
+    return copied, f"{app_name}:clipboard"
+
+
+def front_browser_app() -> str:
+    running = run_osascript(
+        'tell application "System Events" to return name of first process whose frontmost is true',
+        timeout_s=3,
+    ).strip()
+    if running in BROWSER_APPS:
+        return running
+    for app_name in BROWSER_APPS:
+        script = f'tell application "System Events" to return exists process "{app_name}"'
+        if run_osascript(script, timeout_s=2).strip().lower() == "true":
+            return app_name
+    return ""
+
+
+def run_osascript(script: str, *, timeout_s: float) -> str:
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+            check=False,
+        )
+    except Exception:
+        return ""
+    return result.stdout
+
+
+def is_preflight_ok(stdout: str) -> bool:
+    """Return true when agy answered the bridge health check with exactly `ok`.
+
+    PTY-backed CLI output may include ANSI control sequences or blank terminal
+    lines, so compare the meaningful normalized lines rather than raw stdout.
+    This intentionally still rejects warnings or extra prose: preflight should
+    prove the CLI can follow a tiny exact-output instruction before a long run.
+    """
+    lines = [
+        line.strip()
+        for line in normalize_pty_output(stdout).splitlines()
+        if line.strip()
+    ]
+    return len(lines) == 1 and lines[0].lower() == "ok"
+
+
 def run_local_command(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
     res = subprocess.run(
         cmd,
@@ -175,6 +646,9 @@ def is_authentication_error(stdout: str, stderr: str) -> bool:
             "not signed in",
             "sign in to",
             "login required",
+            "authentication required",
+            "authentication timed out",
+            "authorization code",
         )
     )
 
@@ -553,7 +1027,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help=(
             "Optional agy model name. Defaults by mode: review-plan uses Gemini 3.1 Pro (High), "
-            "review-code uses Claude Sonnet 4.6 (Thinking), ask uses Gemini 3.1 Pro (Low)."
+            "review-code uses Gemini 3.1 Pro (High), ask uses Gemini 3.1 Pro (Low)."
         ),
     )
     parser.add_argument("--print-timeout", default="", help="agy print-mode timeout, e.g. 5m0s. Defaults by mode.")
@@ -565,6 +1039,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--conversation", default="", help="Resume a specific agy conversation id.")
     parser.add_argument("--continue", dest="continue_last", action="store_true", help="Continue the most recent agy conversation.")
     parser.add_argument("--sandbox", action="store_true", help="Pass --sandbox to agy.")
+    parser.add_argument(
+        "--pty",
+        dest="use_pty",
+        action="store_true",
+        default=os.name != "nt",
+        help="Run agy behind a pseudo-terminal. Defaults on for POSIX so auth state matches interactive agy.",
+    )
+    parser.add_argument(
+        "--no-pty",
+        dest="use_pty",
+        action="store_false",
+        help="Disable pseudo-terminal execution and use plain pipes.",
+    )
+    parser.add_argument(
+        "--auto-browser-auth",
+        dest="auto_browser_auth",
+        action="store_true",
+        default=sys.platform == "darwin",
+        help="On macOS, best-effort open/read browser OAuth callback codes and submit them via PTY.",
+    )
+    parser.add_argument(
+        "--no-auto-browser-auth",
+        dest="auto_browser_auth",
+        action="store_false",
+        help="Disable browser-based OAuth code extraction.",
+    )
+    parser.add_argument(
+        "--auth-retries",
+        type=int,
+        default=1,
+        help="Total agy attempts during OAuth authentication. Each retry may open a fresh URL; default 1.",
+    )
     parser.add_argument("--stream-status", dest="stream_status", action="store_true", default=True, help="Print heartbeat status to stderr while agy is running.")
     parser.add_argument("--no-stream-status", dest="stream_status", action="store_false", help="Disable heartbeat status output.")
     parser.add_argument("--stream-status-interval-s", type=float, default=30.0, help="Heartbeat interval in seconds.")
@@ -660,6 +1166,9 @@ def main(argv: list[str] | None = None) -> int:
         "model": args.model,
         "model_source": model_source,
         "sandbox": args.sandbox,
+        "use_pty": args.use_pty,
+        "auto_browser_auth": args.auto_browser_auth,
+        "auth_retries": args.auth_retries,
         "state_dir": path_for_display(state_dir, cd_path),
         "focus_files": focus_files,
         "explicit_focus_files": explicit_focus_files,
@@ -684,11 +1193,14 @@ def main(argv: list[str] | None = None) -> int:
         preflight_cmd = build_preflight_command(args)
         preflight_meta: dict[str, Any] = {"command": command_for_meta(preflight_cmd)}
         try:
-            preflight_rc, preflight_stdout, preflight_stderr = run_command(
+            preflight_rc, preflight_stdout, preflight_stderr, preflight_attempts = run_command_with_auth_retries(
                 preflight_cmd,
                 timeout_s=90.0,
                 cwd=cd_path,
                 stream_status=False,
+                use_pty=args.use_pty,
+                auto_browser_auth=args.auto_browser_auth,
+                auth_retries=args.auth_retries,
             )
         except FileNotFoundError as error:
             result = {
@@ -701,12 +1213,45 @@ def main(argv: list[str] | None = None) -> int:
         preflight_meta.update(
             {
                 "exit_code": preflight_rc,
-                "stdout": preflight_stdout.strip(),
-                "stderr": preflight_stderr.strip(),
+                "stdout": redact_auth_material(preflight_stdout.strip()),
+                "stderr": redact_auth_material(preflight_stderr.strip()),
+                "attempts": preflight_attempts,
             }
         )
         meta["preflight"] = preflight_meta
-        if preflight_rc != 0 or preflight_stdout.strip().lower() != "ok":
+        if (
+            preflight_rc != 0
+            and not args.use_pty
+            and is_authentication_error(preflight_stdout, preflight_stderr)
+        ):
+            retry_meta: dict[str, Any] = {"reason": "authentication_error", "use_pty": True}
+            retry_rc, retry_stdout, retry_stderr, retry_attempts = run_command_with_auth_retries(
+                preflight_cmd,
+                timeout_s=90.0,
+                cwd=cd_path,
+                stream_status=False,
+                use_pty=True,
+                auto_browser_auth=args.auto_browser_auth,
+                auth_retries=args.auth_retries,
+            )
+            retry_meta.update(
+                {
+                    "exit_code": retry_rc,
+                    "stdout": redact_auth_material(retry_stdout.strip()),
+                    "stderr": redact_auth_material(retry_stderr.strip()),
+                    "attempts": retry_attempts,
+                }
+            )
+            preflight_meta["retry_with_pty"] = retry_meta
+            if retry_rc == 0 and is_preflight_ok(retry_stdout):
+                preflight_rc, preflight_stdout, preflight_stderr = (
+                    retry_rc,
+                    retry_stdout,
+                    retry_stderr,
+                )
+                args.use_pty = True
+                meta["use_pty"] = True
+        if preflight_rc != 0 or not is_preflight_ok(preflight_stdout):
             auth_hint = ""
             if is_authentication_error(preflight_stdout, preflight_stderr):
                 auth_hint = (
@@ -730,13 +1275,17 @@ def main(argv: list[str] | None = None) -> int:
     meta["command"] = command_for_meta(cmd)
 
     try:
-        rc, stdout, stderr = run_command(
+        rc, stdout, stderr, auth_attempts = run_command_with_auth_retries(
             cmd,
             timeout_s=args.timeout_s,
             cwd=cd_path,
             stream_status=args.stream_status,
             stream_status_interval_s=args.stream_status_interval_s,
+            use_pty=args.use_pty,
+            auto_browser_auth=args.auto_browser_auth,
+            auth_retries=args.auth_retries,
         )
+        meta["auth_attempts"] = auth_attempts
     except FileNotFoundError as error:
         result = {
             "success": False,
@@ -745,6 +1294,31 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 127
+
+    if rc != 0 and not args.use_pty and is_authentication_error(stdout, stderr):
+        meta["auth_retry"] = {
+            "reason": "authentication_error",
+            "from_use_pty": False,
+            "to_use_pty": True,
+            "primary": {
+                "exit_code": rc,
+                "stdout": redact_auth_material(stdout.strip()),
+                "stderr": redact_auth_material(stderr.strip()),
+            },
+        }
+        rc, stdout, stderr, auth_attempts = run_command_with_auth_retries(
+            cmd,
+            timeout_s=args.timeout_s,
+            cwd=cd_path,
+            stream_status=args.stream_status,
+            stream_status_interval_s=args.stream_status_interval_s,
+            use_pty=True,
+            auto_browser_auth=args.auto_browser_auth,
+            auth_retries=args.auth_retries,
+        )
+        meta["auth_attempts"] = auth_attempts
+        args.use_pty = True
+        meta["use_pty"] = True
 
     if (
         rc != 0
@@ -760,26 +1334,30 @@ def main(argv: list[str] | None = None) -> int:
             "to_model": args.fallback_model,
             "primary": {
                 "exit_code": rc,
-                "stdout": stdout.strip(),
-                "stderr": stderr.strip(),
+                "stdout": redact_auth_material(stdout.strip()),
+                "stderr": redact_auth_material(stderr.strip()),
             },
         }
         args.model = args.fallback_model
         fallback_cmd = build_command(args, prompt)
         meta["fallback"]["command"] = command_for_meta(fallback_cmd)
-        rc, stdout, stderr = run_command(
+        rc, stdout, stderr, auth_attempts = run_command_with_auth_retries(
             fallback_cmd,
             timeout_s=args.timeout_s,
             cwd=cd_path,
             stream_status=args.stream_status,
             stream_status_interval_s=args.stream_status_interval_s,
+            use_pty=args.use_pty,
+            auto_browser_auth=args.auto_browser_auth,
+            auth_retries=args.auth_retries,
         )
+        meta["auth_attempts"] = auth_attempts
         meta["model"] = args.model
 
-    agent_messages = stdout.strip()
+    agent_messages = redact_auth_material(stdout.strip())
     meta["exit_code"] = rc
     if stderr.strip():
-        meta["stderr"] = stderr.strip()
+        meta["stderr"] = redact_auth_material(stderr.strip())
 
     success = bool(rc == 0 and agent_messages)
     error_bits = []
@@ -794,9 +1372,9 @@ def main(argv: list[str] | None = None) -> int:
                 "then verify with `agy --print-timeout 30s --print \"Reply with exactly: ok\"`."
             )
         if stderr.strip():
-            error_bits.append(f"[stderr]\n{stderr.strip()}")
+            error_bits.append(f"[stderr]\n{redact_auth_material(stderr.strip())}")
         if stdout.strip():
-            error_bits.append(f"[stdout]\n{stdout.strip()}")
+            error_bits.append(f"[stdout]\n{redact_auth_material(stdout.strip())}")
 
     result: dict[str, Any] = {"success": success, "agent_messages": agent_messages, "meta": meta}
     if not success:
@@ -840,4 +1418,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print(
+            json.dumps(
+                {"success": False, "error": "Interrupted by user."},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        raise SystemExit(130)
