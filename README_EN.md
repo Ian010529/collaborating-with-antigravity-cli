@@ -31,11 +31,11 @@ Restart or refresh Codex Desktop App, then mention `collaborating-with-antigravi
 
 ## Default Models
 
-- `review-plan`: `Gemini 3.1 Pro (High)`
+- `review-plan`: `Claude Sonnet 4.6 (Thinking)`
 - `review-code`: `Gemini 3.1 Pro (High)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 
-Override with `--model`. `review-code` defaults to `Gemini 3.1 Pro (High)` as its fallback model, and only retries after non-authentication timeouts. Use Flash for quick checks; do not default to Opus unless the task is unusually complex.
+Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` after Claude quota/limit errors; `review-code` also defaults to `Gemini 3.1 Pro (High)` as its fallback model. Authentication failures do not trigger model fallback. Use Flash for quick checks; do not default to Opus unless the task is unusually complex.
 
 ## Default Behavior
 

@@ -31,11 +31,11 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 
 ## 默认模型
 
-- `review-plan`: `Gemini 3.1 Pro (High)`
+- `review-plan`: `Claude Sonnet 4.6 (Thinking)`
 - `review-code`: `Gemini 3.1 Pro (High)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 
-可用 `--model` 覆盖。`review-code` 的默认 fallback 是 `Gemini 3.1 Pro (High)`，只在非认证类 timeout 后重试。快速检查可用 Flash；不建议默认用 Opus，除非任务特别复杂。
+可用 `--model` 覆盖。`review-plan` 默认在 Claude 额度/限制类错误时 fallback 到 `Gemini 3.1 Pro (High)`；`review-code` 的默认 fallback 也是 `Gemini 3.1 Pro (High)`。认证失败不会触发模型 fallback。快速检查可用 Flash；不建议默认用 Opus，除非任务特别复杂。
 
 ## 默认行为
 

@@ -69,7 +69,7 @@ If a non-PTY run reports authentication failure, the bridge automatically retrie
 
 Default model by mode when `--model` is omitted:
 
-- `review-plan`: `Gemini 3.1 Pro (High)`
+- `review-plan`: `Claude Sonnet 4.6 (Thinking)`, with `Gemini 3.1 Pro (High)` fallback for quota/limit errors
 - `review-code`: `Gemini 3.1 Pro (High)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 

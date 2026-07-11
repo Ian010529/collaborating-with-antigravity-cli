@@ -32,7 +32,8 @@ DEFAULT_MAX_FOCUS_BYTES = 200_000
 DEFAULT_STATE_DIR = ".codex-antigravity"
 DEFAULT_MAX_CONTEXT_BYTES = 50_000
 DEFAULT_MAX_DIFF_BYTES = 120_000
-DEFAULT_REVIEW_PLAN_MODEL = "Gemini 3.1 Pro (High)"
+DEFAULT_REVIEW_PLAN_MODEL = "Claude Sonnet 4.6 (Thinking)"
+DEFAULT_REVIEW_PLAN_FALLBACK_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_REVIEW_CODE_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_REVIEW_CODE_FALLBACK_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_QUICK_MODEL = "Gemini 3.1 Pro (Low)"
@@ -658,6 +659,26 @@ def is_timeout_error(rc: int, stdout: str, stderr: str) -> bool:
     return rc == 124 or "timed out" in text or "timeout waiting for response" in text
 
 
+def is_quota_error(stdout: str, stderr: str) -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "quota",
+            "rate limit",
+            "rate-limit",
+            "usage limit",
+            "limit exceeded",
+            "resource exhausted",
+            "too many requests",
+            "insufficient credits",
+            "insufficient quota",
+            "billing",
+            "429",
+        )
+    )
+
+
 def normalize_focus_files(cd_path: Path, files: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1026,7 +1047,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--model",
         default="",
         help=(
-            "Optional agy model name. Defaults by mode: review-plan uses Gemini 3.1 Pro (High), "
+            "Optional agy model name. Defaults by mode: review-plan uses Claude Sonnet 4.6 (Thinking), "
             "review-code uses Gemini 3.1 Pro (High), ask uses Gemini 3.1 Pro (Low)."
         ),
     )
@@ -1117,7 +1138,9 @@ def main(argv: list[str] | None = None) -> int:
     args.model = args.model.strip() or default_model_for_mode(args.mode)
     args.print_timeout = args.print_timeout.strip() or default_print_timeout_for_mode(args.mode)
     args.fallback_model = args.fallback_model.strip()
-    if args.mode == "review-code" and not args.fallback_model:
+    if args.mode == "review-plan" and not args.fallback_model:
+        args.fallback_model = DEFAULT_REVIEW_PLAN_FALLBACK_MODEL
+    elif args.mode == "review-code" and not args.fallback_model:
         args.fallback_model = DEFAULT_REVIEW_CODE_FALLBACK_MODEL
     if args.include_git_diff is None:
         args.include_git_diff = args.mode == "review-code"
@@ -1325,7 +1348,7 @@ def main(argv: list[str] | None = None) -> int:
         and args.fallback_model
         and args.fallback_model != args.model
         and not is_authentication_error(stdout, stderr)
-        and is_timeout_error(rc, stdout, stderr)
+        and (is_timeout_error(rc, stdout, stderr) or is_quota_error(stdout, stderr))
     ):
         primary_model = args.model
         meta["fallback"] = {

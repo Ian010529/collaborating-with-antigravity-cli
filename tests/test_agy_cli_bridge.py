@@ -124,7 +124,7 @@ class AgyCliBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.command_for_meta(cmd), ["agy", "--print-timeout", "5m0s", "--sandbox", "--print", "<prompt>"])
 
     def test_default_model_for_mode(self) -> None:
-        self.assertEqual(bridge.default_model_for_mode("review-plan"), "Gemini 3.1 Pro (High)")
+        self.assertEqual(bridge.default_model_for_mode("review-plan"), "Claude Sonnet 4.6 (Thinking)")
         self.assertEqual(bridge.default_model_for_mode("review-code"), "Gemini 3.1 Pro (High)")
         self.assertEqual(bridge.default_model_for_mode("ask"), "Gemini 3.1 Pro (Low)")
 
@@ -233,10 +233,11 @@ class AgyCliBridgeTests(unittest.TestCase):
 
             payload = json.loads(stdout.getvalue())
             self.assertEqual(exit_code, 0)
-            self.assertEqual(payload["meta"]["model"], "Gemini 3.1 Pro (High)")
+            self.assertEqual(payload["meta"]["model"], "Claude Sonnet 4.6 (Thinking)")
             self.assertEqual(payload["meta"]["model_source"], "default")
             self.assertIn("--model", payload["meta"]["command"])
-            self.assertIn("Gemini 3.1 Pro (High)", payload["meta"]["command"])
+            self.assertIn("Claude Sonnet 4.6 (Thinking)", payload["meta"]["command"])
+            self.assertEqual(payload["meta"]["fallback_model"], "Gemini 3.1 Pro (High)")
 
     def test_main_uses_review_code_default_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -314,6 +315,34 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertTrue(payload["success"])
             self.assertEqual(payload["meta"]["model"], "Gemini 3.1 Pro (High)")
             self.assertTrue(payload["meta"]["fallback"]["attempted"])
+            self.assertEqual(mock_run.call_count, 2)
+
+    def test_review_plan_falls_back_on_quota_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-plan",
+                "--PROMPT",
+                "Review plan.",
+            ]
+
+            with mock.patch.object(
+                bridge,
+                "run_command",
+                side_effect=[(1, "", "quota exceeded"), (0, "ok", "")],
+            ) as mock_run:
+                with redirect_stdout(stdout):
+                    exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["meta"]["model"], "Gemini 3.1 Pro (High)")
+            self.assertEqual(payload["meta"]["fallback"]["from_model"], "Claude Sonnet 4.6 (Thinking)")
+            self.assertEqual(payload["meta"]["fallback"]["to_model"], "Gemini 3.1 Pro (High)")
             self.assertEqual(mock_run.call_count, 2)
 
     def test_fallback_model_does_not_retry_auth_failure(self) -> None:
