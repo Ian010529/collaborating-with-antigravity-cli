@@ -305,6 +305,7 @@ def run_command_pty(
                     if not auth_url_opened and auto_browser_auth:
                         auth_url = extract_auth_url(text_so_far)
                         if auth_url:
+                            oauth_prompt_seen = True
                             if open_auth_url_enabled:
                                 if open_auth_url(auth_url):
                                     print(
@@ -380,6 +381,10 @@ def _looks_like_oauth_prompt(text: str) -> bool:
     return (
         "paste the authorization code" in normalized
         or "authorization code here" in normalized
+        or "enter the authorization code" in normalized
+        or "enter authorization code" in normalized
+        or "paste the code" in normalized
+        or "enter the code" in normalized
         or "waiting for authentication" in normalized
     )
 

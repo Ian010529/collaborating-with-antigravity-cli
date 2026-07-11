@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -457,6 +460,67 @@ class AgyCliBridgeTests(unittest.TestCase):
         self.assertEqual(code, "4/copiedCodeValue1234567890")
         self.assertEqual(source, "clipboard")
         mock_tabs.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS clipboard and PTY behavior")
+    def test_pty_oauth_url_alone_triggers_clipboard_polling(self) -> None:
+        old_clipboard = subprocess.run(
+            ["pbpaste"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout
+        callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"
+        try:
+            subprocess.run(["pbcopy"], input="", text=True, check=False)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                fake_agy = root / "fake_agy.py"
+                fake_agy.write_text(
+                    "\n".join(
+                        [
+                            "#!/usr/bin/env python3",
+                            "import sys",
+                            "print('Open this URL: https://accounts.google.com/o/oauth2/auth?client_id=fake', flush=True)",
+                            "code = sys.stdin.readline().strip()",
+                            "print(f'RECEIVED_CODE={code}', flush=True)",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                fake_agy.chmod(fake_agy.stat().st_mode | stat.S_IXUSR)
+
+                timer = threading.Timer(
+                    1.0,
+                    lambda: subprocess.run(["pbcopy"], input=callback, text=True, check=False),
+                )
+                timer.start()
+                stdout = StringIO()
+                argv = [
+                    "--agy-bin",
+                    str(fake_agy),
+                    "--cd",
+                    tmp,
+                    "--mode",
+                    "ask",
+                    "--PROMPT",
+                    "Simulate OAuth.",
+                    "--timeout-s",
+                    "10",
+                    "--no-stream-status",
+                ]
+                try:
+                    with redirect_stdout(stdout):
+                        exit_code = bridge.main(argv)
+                finally:
+                    timer.cancel()
+
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(exit_code, 0)
+                self.assertTrue(payload["success"])
+                self.assertIn("RECEIVED_CODE=4/<redacted>", payload["agent_messages"])
+                self.assertFalse(payload["meta"]["open_auth_url"])
+        finally:
+            subprocess.run(["pbcopy"], input=old_clipboard, text=True, check=False)
 
     def test_auth_retries_default_to_one_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
