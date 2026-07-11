@@ -15,7 +15,7 @@
 5. 需要验证时传 `--test-command`；bridge 在本地执行测试，并把输出交给 `agy` 分析。
 6. 任务结束后用 `--cleanup archive` 留痕，或 `--cleanup delete` 删除状态。
 
-`review-code` 默认会先做 `agy` 健康检查，使用 `15m0s` print timeout，把 bounded `git diff` 快照交给 `agy`，并在非认证类超时时用 `Gemini 3.1 Pro (High)` 重试一次。
+`review-code` 默认会先做 `agy` 登录/健康检查，使用 `15m0s` print timeout，把 bounded `git diff` 快照交给 `agy`，并在非认证类超时时用 `Gemini 3.1 Pro (High)` 重试一次。
 
 `.codex-antigravity/` 默认被 `.gitignore` 排除，不应提交敏感上下文或 transcript。保持 handoff 文件简洁，不要把完整 transcript 当作下一轮上下文。
 
@@ -35,14 +35,25 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 - `review-code`: `Claude Sonnet 4.6 (Thinking)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 
-可用 `--model` 覆盖。快速检查可用 Flash；不建议默认用 Opus，除非任务特别复杂。
+可用 `--model` 覆盖。`review-code` 的默认 fallback 是 `Gemini 3.1 Pro (High)`，只在非认证类 timeout 后重试。快速检查可用 Flash；不建议默认用 Opus，除非任务特别复杂。
+
+## 默认行为
+
+- `review-plan` 和 `ask` 默认 `--print-timeout 5m0s`；`review-code` 默认 `15m0s`；外层进程 timeout 默认 `--timeout-s 1800`。
+- `review-code` 默认启用 `--preflight`，先执行 `agy --print-timeout 30s --print "Reply with exactly: ok"`。如果检测到未登录、登录失效或认证失败，会跳过长审查并提示先直接运行 `agy` 登录。
+- `review-code` 默认包含当前 tracked `git diff`。diff 小于 `--max-diff-bytes`（默认 120000）时传完整 diff；超过后只传 diff stat 和文件列表。
+- 如果没有显式 `--file`，bridge 会从 `--PROMPT` 自动提取仓库内文件路径，最多 `--max-files 5` 个；焦点文件总量超过 `--max-focus-bytes 200000` 时只给 warning。
+- `--context-file` 可重复传入，默认总上限 `--max-context-bytes 50000`。超限或文件不存在会直接阻止运行。
+- `--test-command` 会在本地工作目录执行，输出作为实际测试结果交给 `agy`。在干净工作区使用，避免测试命令生成的文件混入后续 diff。
+- bridge 总是输出 JSON，主要字段是 `success`、`agent_messages`、`meta`，失败时会附带 `error`。`--dry-run` 只构建 prompt/command 并返回 JSON，不调用 `agy`。
+- `--write-output` 的相对路径会写到 `--state-dir` 下；`--write-transcript` 写入 `transcripts/`，并更新 `state.json` 中最近 100 次运行记录。
 
 ## 常用命令
 
 ```bash
 python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-plan \
   --context-file .codex-antigravity/current/plan.md \
-  --write-output current/plan-review.md \
+  --write-output current/plan-review.md --write-transcript \
   --PROMPT "Review Codex's plan for risks, edge cases, and tests."
 
 python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
@@ -51,15 +62,17 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-有用参数：`--model`、`--fallback-model`、`--file`、`--state-dir`、`--context-file`、`--write-output`、`--write-transcript`、`--max-context-bytes`、`--max-diff-bytes`、`--response-budget standard|compact|none`、`--no-preflight`、`--no-include-git-diff`、`--stream-status`、`--cleanup keep|archive|delete`。
+有用参数：`--agy-bin`、`--model`、`--print-timeout`、`--timeout-s`、`--fallback-model`、`--file`、`--add-dir`、`--test-command`、`--conversation`、`--continue`、`--sandbox`、`--state-dir`、`--context-file`、`--write-output`、`--write-transcript`、`--run-id`、`--dry-run`、`--max-context-bytes`、`--max-diff-bytes`、`--response-budget standard|compact|none`、`--no-preflight`、`--no-include-git-diff`、`--no-auto-extract-files`、`--stream-status`、`--no-stream-status`、`--cleanup keep|archive|delete`。
 
-超时/认证排查：
+登录/认证排查：
 
 ```bash
 agy --print-timeout 30s --print "Reply with exactly: ok"
 ```
 
-如果提示登录失败，先直接运行 `agy` 完成登录。常用可靠性参数：`--print-timeout`、`--no-preflight`、`--no-include-git-diff`、`--max-diff-bytes`、`--fallback-model`。
+如果提示登录失败，先直接运行 `agy` 完成登录，再重复上面的健康检查。bridge 会识别 `authentication failed`、`please sign in`、`not signed in`、`sign in to`、`login required` 等认证错误，并避免把认证失败误判成可 fallback 的普通 timeout。
+
+常用可靠性参数：`--print-timeout`、`--preflight-timeout`、`--no-preflight`、`--no-include-git-diff`、`--max-diff-bytes`、`--fallback-model`、`--stream-status-interval-s`。
 
 ## 本地测试
 
