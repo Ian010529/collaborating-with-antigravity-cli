@@ -35,7 +35,7 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 - `review-code`: `Gemini 3.1 Pro (High)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 
-可用 `--model` 覆盖。`review-plan` 默认在 Claude 额度/限制类错误时 fallback 到 `Gemini 3.1 Pro (High)`；`review-code` 的默认 fallback 也是 `Gemini 3.1 Pro (High)`。认证失败不会触发模型 fallback。快速检查可用 Flash；不建议默认用 Opus，除非任务特别复杂。
+可用 `--model` 覆盖。`review-plan` 默认在 Claude 额度/限制类错误时 fallback 到 `Gemini 3.1 Pro (High)`；`review-code` 的默认 fallback 也是 `Gemini 3.1 Pro (High)`。认证失败不会触发模型 fallback；如果 `agy` 看起来私自切到 Flash，而请求模型不是 Flash，bridge 会把这次运行标记为失败。快速检查可用 Flash；不建议默认用 Opus，除非任务特别复杂。
 
 ## 默认行为
 
@@ -51,11 +51,11 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 
 ## OAuth 登录处理
 
-macOS 默认启用 `--auto-browser-auth`。bridge 会优先用 Chrome 打开 OAuth URL（默认 `AGY_AUTH_BROWSER="Google Chrome"`），而不是依赖系统默认浏览器；每个 OAuth URL 只发起一次浏览器打开，避免 AppleScript/open fallback 造成重复登录页。需要时可把 `AGY_AUTH_BROWSER` 改成其他浏览器应用名。默认 `--auth-retries 1`，只尝试一次登录，避免在用户未操作时频繁弹出新登录页；只有用户正在主动完成登录并接受重复打开新 OAuth URL 时才提高，例如 `--auth-retries 5`。
+macOS 默认启用 `--auto-browser-auth`。bridge 默认只监听 OAuth prompt、读取剪贴板或浏览器可见 code，不主动打开 OAuth URL，避免和 `agy` 自己打开浏览器叠加导致两个登录页。如果 `agy` 只打印 URL 但没有打开浏览器，再显式传 `--open-auth-url`；此时 bridge 会用 Chrome 打开一次（默认 `AGY_AUTH_BROWSER="Google Chrome"`）。默认 `--auth-retries 1`，只尝试一次登录，避免在用户未操作时频繁弹出新登录页；只有用户正在主动完成登录并接受重复打开新 OAuth URL 时才提高，例如 `--auth-retries 5`。
 
 在 PTY 运行中，如果 `agy` 打印 OAuth URL 或要求输入 authorization code，bridge 会在内存中处理 code，不创建 `auth-code` 文件，也不会把 OAuth URL 或一次性 code 原样写入 JSON/transcript。它会：
 
-- 解析 `agy` 输出里的 OAuth URL，并用 Chrome 打开。
+- 解析 `agy` 输出里的 OAuth URL；只有传 `--open-auth-url` 时才由 bridge 用 Chrome 打开。
 - 轮询 Chrome，随后检查 Edge/Chromium/Safari 的 tab URL 和可读页面文本。
 - 从 callback 页面里的 `?code=...`、HTML 转义链接里的 `code`、可见页面文本或剪贴板内容中提取 code。
 - OAuth prompt 活跃期间持续轮询剪贴板，因此用户点击页面 `Copy to Clipboard` 后，即使 `agy` 没有继续输出也能读到 code；必要时短暂复制前台浏览器页面文本，再恢复原剪贴板。
@@ -77,7 +77,7 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-有用参数：`--agy-bin`、`--model`、`--print-timeout`、`--timeout-s`、`--fallback-model`、`--file`、`--add-dir`、`--test-command`、`--conversation`、`--continue`、`--sandbox`、`--pty`、`--no-pty`、`--auto-browser-auth`、`--no-auto-browser-auth`、`--auth-retries`、`--state-dir`、`--context-file`、`--write-output`、`--write-transcript`、`--run-id`、`--dry-run`、`--max-context-bytes`、`--max-diff-bytes`、`--response-budget standard|compact|none`、`--no-preflight`、`--no-include-git-diff`、`--no-auto-extract-files`、`--stream-status`、`--no-stream-status`、`--cleanup keep|archive|delete`。
+有用参数：`--agy-bin`、`--model`、`--print-timeout`、`--timeout-s`、`--fallback-model`、`--file`、`--add-dir`、`--test-command`、`--conversation`、`--continue`、`--sandbox`、`--pty`、`--no-pty`、`--auto-browser-auth`、`--no-auto-browser-auth`、`--open-auth-url`、`--no-open-auth-url`、`--auth-retries`、`--state-dir`、`--context-file`、`--write-output`、`--write-transcript`、`--run-id`、`--dry-run`、`--max-context-bytes`、`--max-diff-bytes`、`--response-budget standard|compact|none`、`--no-preflight`、`--no-include-git-diff`、`--no-auto-extract-files`、`--stream-status`、`--no-stream-status`、`--cleanup keep|archive|delete`。
 
 登录/认证排查：
 

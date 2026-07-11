@@ -256,6 +256,7 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertEqual(payload["meta"]["auth_retries"], 1)
             self.assertEqual(payload["meta"]["use_pty"], bridge.os.name != "nt")
             self.assertEqual(payload["meta"]["auto_browser_auth"], bridge.sys.platform == "darwin")
+            self.assertFalse(payload["meta"]["open_auth_url"])
 
     def test_preflight_failure_skips_review_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -285,6 +286,8 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertIn("preflight failed", payload["error"])
             self.assertIn("sign in", payload["error"])
             mock_run.assert_called_once()
+            self.assertIn("--model", mock_run.call_args.args[0])
+            self.assertIn("Gemini 3.1 Pro (High)", mock_run.call_args.args[0])
 
     def test_fallback_model_retries_non_auth_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -412,6 +415,27 @@ class AgyCliBridgeTests(unittest.TestCase):
             ["open", "-a", "Google Chrome", "https://accounts.google.com/o/oauth2/auth?client_id=abc"],
         )
 
+    def test_dry_run_can_enable_bridge_oauth_opening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--open-auth-url",
+                "--PROMPT",
+                "Review code.",
+                "--dry-run",
+            ]
+
+            with redirect_stdout(stdout):
+                exit_code = bridge.main(argv)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["meta"]["open_auth_url"])
+
     def test_read_clipboard_authorization_code_uses_copied_callback(self) -> None:
         callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"
 
@@ -454,6 +478,25 @@ class AgyCliBridgeTests(unittest.TestCase):
         self.assertIn("authentication", stderr)
         self.assertEqual(len(attempts), 1)
         self.assertEqual(mock_run.call_count, 1)
+
+    def test_unrequested_flash_model_output_fails_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = ["--cd", tmp, "--mode", "review-code", "--no-preflight", "--PROMPT", "Review code."]
+
+            with mock.patch.object(
+                bridge,
+                "run_command",
+                return_value=(0, "Using model Gemini 3.5 Flash (High)\nreview text\n", ""),
+            ):
+                with redirect_stdout(stdout):
+                    exit_code = bridge.main(argv)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["meta"]["model_violation"]["reason"], "unrequested_flash_model")
+        self.assertIn("Flash model", payload["error"])
 
     def test_explicit_model_overrides_mode_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

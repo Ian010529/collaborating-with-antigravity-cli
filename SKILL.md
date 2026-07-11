@@ -30,9 +30,9 @@ Before long reviews, verify authentication with:
 agy --print-timeout 30s --print "Reply with exactly: ok"
 ```
 
-On macOS, the bridge enables `--auto-browser-auth` by default. It opens each OAuth URL once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; set `AGY_AUTH_BROWSER` to another browser app name only when needed. Changing the macOS system default browser may require a GUI confirmation, so do not assume it can be completed silently. During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
+On macOS, the bridge enables `--auto-browser-auth` by default. It watches OAuth prompts and reads copied/browser-visible authorization codes, but it does not open OAuth URLs by default because `agy` may already open the browser. Use `--open-auth-url` only when agy prints a URL but does not open a browser; then the bridge opens each OAuth URL once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
 
-1. open the OAuth URL in Chrome when it can parse one;
+1. detect the OAuth URL and, only with `--open-auth-url`, open it in Chrome;
 2. poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text for an OAuth `code`;
 3. detect codes embedded in callback-page links such as `?code=...`, including HTML-escaped relative URLs;
 4. while the OAuth prompt is active, keep polling the clipboard so the page's "Copy to Clipboard" button can be read even when `agy` prints no further output;
@@ -75,6 +75,8 @@ Default model by mode when `--model` is omitted:
 
 Use `Gemini 3.5 Flash` only for quick checks. Do not default to Opus unless the task is unusually complex and the user accepts extra latency/cost.
 
+If agy appears to switch to a Flash model when the requested model is not Flash, the bridge treats the run as failed instead of accepting a downgraded review.
+
 ## Commands
 
 Resolve the bundled bridge script from this skill directory; do not assume the
@@ -106,7 +108,7 @@ Code review:
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-Useful flags: `--model`, `--fallback-model`, `--file`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--no-preflight`, `--no-include-git-diff`, `--stream-status`, `--cleanup keep|archive|delete`.
+Useful flags: `--model`, `--fallback-model`, `--file`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--open-auth-url`, `--no-preflight`, `--no-include-git-diff`, `--stream-status`, `--cleanup keep|archive|delete`.
 
 On POSIX systems the bridge runs `agy` behind a pseudo-terminal by default, so
 print-mode reviews reuse the same authentication/session behavior as an

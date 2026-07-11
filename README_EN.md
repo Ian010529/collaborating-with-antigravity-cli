@@ -35,7 +35,7 @@ Restart or refresh Codex Desktop App, then mention `collaborating-with-antigravi
 - `review-code`: `Gemini 3.1 Pro (High)`
 - `ask`: `Gemini 3.1 Pro (Low)`
 
-Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` after Claude quota/limit errors; `review-code` also defaults to `Gemini 3.1 Pro (High)` as its fallback model. Authentication failures do not trigger model fallback. Use Flash for quick checks; do not default to Opus unless the task is unusually complex.
+Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` after Claude quota/limit errors; `review-code` also defaults to `Gemini 3.1 Pro (High)` as its fallback model. Authentication failures do not trigger model fallback; if `agy` appears to switch to Flash while the requested model is not Flash, the bridge marks the run failed. Use Flash for quick checks; do not default to Opus unless the task is unusually complex.
 
 ## Default Behavior
 
@@ -51,11 +51,11 @@ Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` aft
 
 ## OAuth Handling
 
-On macOS, `--auto-browser-auth` is enabled by default. The bridge opens OAuth URLs in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`) instead of relying on the system default browser; each OAuth URL is opened once to avoid duplicate login pages from AppleScript/open fallback paths. Set `AGY_AUTH_BROWSER` to another browser app name only when needed. It defaults to `--auth-retries 1`, so it tries login once and avoids repeatedly opening fresh login pages while the user is not acting; increase it, for example to `--auth-retries 5`, only when the user is actively completing browser login.
+On macOS, `--auto-browser-auth` is enabled by default. The bridge listens for OAuth prompts and reads copied/browser-visible codes, but does not open OAuth URLs by default so it does not duplicate `agy`'s own browser open. If `agy` prints a URL but does not open a browser, pass `--open-auth-url`; then the bridge opens it once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). It defaults to `--auth-retries 1`, so it tries login once and avoids repeatedly opening fresh login pages while the user is not acting; increase it, for example to `--auth-retries 5`, only when the user is actively completing browser login.
 
 During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge handles the code in memory. It does not create an `auth-code` file, and OAuth URLs or one-time codes are redacted from JSON output and transcripts. It will:
 
-- Parse the OAuth URL from `agy` output and open it in Chrome.
+- Parse the OAuth URL from `agy` output; only `--open-auth-url` makes the bridge open it in Chrome.
 - Poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text.
 - Extract codes from callback-page `?code=...` URLs, HTML-escaped links, visible page text, or clipboard content.
 - Keep polling the clipboard while the OAuth prompt is active, so the page's `Copy to Clipboard` button can be read even when `agy` prints no further output; if needed, briefly copy front-browser page text and restore the previous clipboard.
@@ -77,7 +77,7 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
   --PROMPT "Review the current git diff. Do not edit files."
 ```
 
-Useful flags: `--agy-bin`, `--model`, `--print-timeout`, `--timeout-s`, `--fallback-model`, `--file`, `--add-dir`, `--test-command`, `--conversation`, `--continue`, `--sandbox`, `--pty`, `--no-pty`, `--auto-browser-auth`, `--no-auto-browser-auth`, `--auth-retries`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--run-id`, `--dry-run`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--no-preflight`, `--no-include-git-diff`, `--no-auto-extract-files`, `--stream-status`, `--no-stream-status`, `--cleanup keep|archive|delete`.
+Useful flags: `--agy-bin`, `--model`, `--print-timeout`, `--timeout-s`, `--fallback-model`, `--file`, `--add-dir`, `--test-command`, `--conversation`, `--continue`, `--sandbox`, `--pty`, `--no-pty`, `--auto-browser-auth`, `--no-auto-browser-auth`, `--open-auth-url`, `--no-open-auth-url`, `--auth-retries`, `--state-dir`, `--context-file`, `--write-output`, `--write-transcript`, `--run-id`, `--dry-run`, `--max-context-bytes`, `--max-diff-bytes`, `--response-budget standard|compact|none`, `--no-preflight`, `--no-include-git-diff`, `--no-auto-extract-files`, `--stream-status`, `--no-stream-status`, `--cleanup keep|archive|delete`.
 
 Login/auth check:
 

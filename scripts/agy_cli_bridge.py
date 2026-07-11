@@ -131,6 +131,7 @@ def run_command(
     stream_status_interval_s: float = 30.0,
     use_pty: bool = False,
     auto_browser_auth: bool = False,
+    open_auth_url_enabled: bool = False,
 ) -> tuple[int, str, str]:
     env = os.environ.copy()
     resolved_cmd = cmd.copy()
@@ -144,6 +145,7 @@ def run_command(
             stream_status=stream_status,
             stream_status_interval_s=stream_status_interval_s,
             auto_browser_auth=auto_browser_auth,
+            open_auth_url_enabled=open_auth_url_enabled,
         )
     process = subprocess.Popen(
         resolved_cmd,
@@ -194,6 +196,7 @@ def run_command_with_auth_retries(
     stream_status_interval_s: float = 30.0,
     use_pty: bool = False,
     auto_browser_auth: bool = False,
+    open_auth_url_enabled: bool = False,
     auth_retries: int = 1,
 ) -> tuple[int, str, str, list[dict[str, Any]]]:
     """Run agy, retrying fresh OAuth attempts when agy's short auth window expires."""
@@ -211,6 +214,7 @@ def run_command_with_auth_retries(
             stream_status_interval_s=stream_status_interval_s,
             use_pty=use_pty,
             auto_browser_auth=auto_browser_auth,
+            open_auth_url_enabled=open_auth_url_enabled,
         )
         attempts.append(
             {
@@ -238,6 +242,7 @@ def run_command_pty(
     stream_status: bool = False,
     stream_status_interval_s: float = 30.0,
     auto_browser_auth: bool = False,
+    open_auth_url_enabled: bool = False,
 ) -> tuple[int, str, str]:
     """Run agy behind a pseudo-terminal.
 
@@ -300,15 +305,22 @@ def run_command_pty(
                     if not auth_url_opened and auto_browser_auth:
                         auth_url = extract_auth_url(text_so_far)
                         if auth_url:
-                            if open_auth_url(auth_url):
-                                print(
-                                    "[agy-bridge] opened OAuth URL in browser.",
-                                    file=sys.stderr,
-                                    flush=True,
-                                )
+                            if open_auth_url_enabled:
+                                if open_auth_url(auth_url):
+                                    print(
+                                        "[agy-bridge] opened OAuth URL in browser.",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                                else:
+                                    print(
+                                        "[agy-bridge] could not open OAuth URL automatically.",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
                             else:
                                 print(
-                                    "[agy-bridge] could not open OAuth URL automatically.",
+                                    "[agy-bridge] detected OAuth URL; relying on agy's browser open and watching for copied code.",
                                     file=sys.stderr,
                                     flush=True,
                                 )
@@ -690,6 +702,33 @@ def is_quota_error(stdout: str, stderr: str) -> bool:
     )
 
 
+def detected_unrequested_flash_model(requested_model: str, stdout: str, stderr: str) -> bool:
+    """Detect when agy appears to switch to a Flash model without being asked."""
+    if "flash" in requested_model.lower():
+        return False
+    text = normalize_pty_output(f"{stdout}\n{stderr}")
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if "flash" not in normalized:
+            continue
+        if any(
+            marker in normalized
+            for marker in (
+                "model",
+                "using",
+                "selected",
+                "switch",
+                "switched",
+                "fallback",
+                "falling back",
+                "downgrade",
+                "downgraded",
+            )
+        ):
+            return True
+    return False
+
+
 def normalize_focus_files(cd_path: Path, files: list[str]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1022,13 +1061,18 @@ def build_command(args: argparse.Namespace, prompt: str) -> list[str]:
 
 
 def build_preflight_command(args: argparse.Namespace) -> list[str]:
-    return [
-        args.agy_bin,
-        "--print-timeout",
-        args.preflight_timeout,
-        "--print",
-        "Reply with exactly: ok",
-    ]
+    cmd = [args.agy_bin]
+    if args.model:
+        cmd.extend(["--model", args.model])
+    cmd.extend(
+        [
+            "--print-timeout",
+            args.preflight_timeout,
+            "--print",
+            "Reply with exactly: ok",
+        ]
+    )
+    return cmd
 
 
 def command_for_meta(cmd: list[str]) -> list[str]:
@@ -1096,6 +1140,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="auto_browser_auth",
         action="store_false",
         help="Disable browser-based OAuth code extraction.",
+    )
+    parser.add_argument(
+        "--open-auth-url",
+        dest="open_auth_url",
+        action="store_true",
+        default=False,
+        help="Have the bridge open parsed OAuth URLs. Defaults off to avoid duplicating agy's own browser open.",
+    )
+    parser.add_argument(
+        "--no-open-auth-url",
+        dest="open_auth_url",
+        action="store_false",
+        help="Do not have the bridge open OAuth URLs; still read copied/browser-visible authorization codes.",
     )
     parser.add_argument(
         "--auth-retries",
@@ -1202,6 +1259,7 @@ def main(argv: list[str] | None = None) -> int:
         "sandbox": args.sandbox,
         "use_pty": args.use_pty,
         "auto_browser_auth": args.auto_browser_auth,
+        "open_auth_url": args.open_auth_url,
         "auth_retries": args.auth_retries,
         "state_dir": path_for_display(state_dir, cd_path),
         "focus_files": focus_files,
@@ -1234,6 +1292,7 @@ def main(argv: list[str] | None = None) -> int:
                 stream_status=False,
                 use_pty=args.use_pty,
                 auto_browser_auth=args.auto_browser_auth,
+                open_auth_url_enabled=args.open_auth_url,
                 auth_retries=args.auth_retries,
             )
         except FileNotFoundError as error:
@@ -1266,6 +1325,7 @@ def main(argv: list[str] | None = None) -> int:
                 stream_status=False,
                 use_pty=True,
                 auto_browser_auth=args.auto_browser_auth,
+                open_auth_url_enabled=args.open_auth_url,
                 auth_retries=args.auth_retries,
             )
             retry_meta.update(
@@ -1317,6 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
             stream_status_interval_s=args.stream_status_interval_s,
             use_pty=args.use_pty,
             auto_browser_auth=args.auto_browser_auth,
+            open_auth_url_enabled=args.open_auth_url,
             auth_retries=args.auth_retries,
         )
         meta["auth_attempts"] = auth_attempts
@@ -1348,6 +1409,7 @@ def main(argv: list[str] | None = None) -> int:
             stream_status_interval_s=args.stream_status_interval_s,
             use_pty=True,
             auto_browser_auth=args.auto_browser_auth,
+            open_auth_url_enabled=args.open_auth_url,
             auth_retries=args.auth_retries,
         )
         meta["auth_attempts"] = auth_attempts
@@ -1383,6 +1445,7 @@ def main(argv: list[str] | None = None) -> int:
             stream_status_interval_s=args.stream_status_interval_s,
             use_pty=args.use_pty,
             auto_browser_auth=args.auto_browser_auth,
+            open_auth_url_enabled=args.open_auth_url,
             auth_retries=args.auth_retries,
         )
         meta["auth_attempts"] = auth_attempts
@@ -1393,9 +1456,21 @@ def main(argv: list[str] | None = None) -> int:
     if stderr.strip():
         meta["stderr"] = redact_auth_material(stderr.strip())
 
-    success = bool(rc == 0 and agent_messages)
+    flash_model_detected = detected_unrequested_flash_model(args.model, stdout, stderr)
+    if flash_model_detected:
+        meta["model_violation"] = {
+            "reason": "unrequested_flash_model",
+            "requested_model": args.model,
+        }
+
+    success = bool(rc == 0 and agent_messages and not flash_model_detected)
     error_bits = []
     if not success:
+        if flash_model_detected:
+            error_bits.append(
+                "Antigravity CLI appeared to switch to a Flash model even though the bridge requested "
+                f"`{args.model}`. Treating this run as failed instead of accepting a downgraded review."
+            )
         if rc == 124:
             error_bits.append("Antigravity CLI process timed out.")
         elif rc != 0:
