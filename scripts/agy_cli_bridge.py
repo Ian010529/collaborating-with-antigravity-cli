@@ -104,6 +104,8 @@ BROWSER_APPS = (
     "Safari",
 )
 DEFAULT_AUTH_BROWSER = "Google Chrome"
+ALLOW_OPEN_AUTH_URL_ENV = "AGY_BRIDGE_ALLOW_OPEN_AUTH_URL"
+ALLOW_AUTH_RETRIES_ENV = "AGY_BRIDGE_ALLOW_AUTH_RETRIES"
 
 
 def configure_stdio() -> None:
@@ -415,6 +417,27 @@ def extract_authorization_code(text: str) -> str:
 
 def preferred_auth_browser() -> str:
     return os.getenv("AGY_AUTH_BROWSER", DEFAULT_AUTH_BROWSER).strip()
+
+
+def env_flag_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def auth_option_error(args: argparse.Namespace) -> str | None:
+    problems: list[str] = []
+    if args.open_auth_url and not env_flag_enabled(ALLOW_OPEN_AUTH_URL_ENV):
+        problems.append(
+            f"`--open-auth-url` is disabled unless {ALLOW_OPEN_AUTH_URL_ENV}=1 is set; "
+            "agy often opens the OAuth URL itself, so bridge-opening can create duplicate login pages."
+        )
+    if args.auth_retries > 1 and not env_flag_enabled(ALLOW_AUTH_RETRIES_ENV):
+        problems.append(
+            f"`--auth-retries {args.auth_retries}` is disabled unless {ALLOW_AUTH_RETRIES_ENV}=1 is set; "
+            "each retry can create a fresh OAuth URL and another login page."
+        )
+    if problems:
+        return " ".join(problems)
+    return None
 
 
 def open_auth_url(url: str) -> bool:
@@ -1219,6 +1242,23 @@ def main(argv: list[str] | None = None) -> int:
         args.include_git_diff = args.mode == "review-code"
     if args.preflight is None:
         args.preflight = args.mode == "review-code"
+    auth_error = auth_option_error(args)
+    if auth_error:
+        result = {
+            "success": False,
+            "error": auth_error,
+            "meta": {
+                "cli": "agy",
+                "mode": args.mode,
+                "run_id": run_id,
+                "model": args.model,
+                "open_auth_url": args.open_auth_url,
+                "auth_retries": args.auth_retries,
+                "state_dir": path_for_display(state_dir, cd_path),
+            },
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 2
 
     explicit_focus_files = normalize_focus_files(cd_path, args.files)
     auto_focus_files: list[str] = []

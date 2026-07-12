@@ -51,11 +51,11 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 
 ## OAuth 登录处理
 
-macOS 默认启用 `--auto-browser-auth`。bridge 默认只监听 OAuth prompt、读取剪贴板或浏览器可见 code，不主动打开 OAuth URL，避免和 `agy` 自己打开浏览器叠加导致两个登录页。如果 `agy` 只打印 URL 但没有打开浏览器，再显式传 `--open-auth-url`；此时 bridge 会用 Chrome 打开一次（默认 `AGY_AUTH_BROWSER="Google Chrome"`）。默认 `--auth-retries 1`，只尝试一次登录，避免在用户未操作时频繁弹出新登录页；只有用户正在主动完成登录并接受重复打开新 OAuth URL 时才提高，例如 `--auth-retries 5`。
+macOS 默认启用 `--auto-browser-auth`。bridge 默认只监听 OAuth prompt、读取剪贴板或浏览器可见 code，不主动打开 OAuth URL，避免和 `agy` 自己打开浏览器叠加导致两个登录页。`--open-auth-url` 默认会被拒绝；只有确认 `agy` 只打印 URL 但没有打开浏览器时，才设置 `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` 并显式传 `--open-auth-url`，此时 bridge 会用 Chrome 打开一次（默认 `AGY_AUTH_BROWSER="Google Chrome"`）。默认 `--auth-retries 1`，只尝试一次登录；`--auth-retries > 1` 默认也会被拒绝，只有用户正在主动完成登录并接受重复打开新 OAuth URL 时才设置 `AGY_BRIDGE_ALLOW_AUTH_RETRIES=1` 后提高。
 
 在 PTY 运行中，如果 `agy` 打印 OAuth URL 或要求输入 authorization code，bridge 会在内存中处理 code，不创建 `auth-code` 文件，也不会把 OAuth URL 或一次性 code 原样写入 JSON/transcript。它会：
 
-- 解析 `agy` 输出里的 OAuth URL；只有传 `--open-auth-url` 时才由 bridge 用 Chrome 打开。
+- 解析 `agy` 输出里的 OAuth URL；只有设置 `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` 且传 `--open-auth-url` 时才由 bridge 用 Chrome 打开。
 - 轮询 Chrome，随后检查 Edge/Chromium/Safari 的 tab URL 和可读页面文本。
 - 从 callback 页面里的 `?code=...`、HTML 转义链接里的 `code`、可见页面文本或剪贴板内容中提取 code。
 - OAuth prompt 活跃期间持续轮询剪贴板，因此用户点击页面 `Copy to Clipboard` 后，即使 `agy` 没有继续输出也能读到 code；必要时短暂复制前台浏览器页面文本，再恢复原剪贴板。

@@ -478,7 +478,7 @@ class AgyCliBridgeTests(unittest.TestCase):
             ["open", "-a", "Google Chrome", "https://accounts.google.com/o/oauth2/auth?client_id=abc"],
         )
 
-    def test_dry_run_can_enable_bridge_oauth_opening(self) -> None:
+    def test_open_auth_url_requires_explicit_env_unlock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stdout = StringIO()
             argv = [
@@ -496,8 +496,54 @@ class AgyCliBridgeTests(unittest.TestCase):
                 exit_code = bridge.main(argv)
 
         payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(payload["success"])
+        self.assertIn("AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1", payload["error"])
+
+    def test_dry_run_can_enable_bridge_oauth_opening_with_env_unlock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--open-auth-url",
+                "--PROMPT",
+                "Review code.",
+                "--dry-run",
+            ]
+
+            with redirect_stdout(stdout):
+                with mock.patch.dict(bridge.os.environ, {"AGY_BRIDGE_ALLOW_OPEN_AUTH_URL": "1"}):
+                    exit_code = bridge.main(argv)
+
+        payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["meta"]["open_auth_url"])
+
+    def test_auth_retries_above_one_requires_explicit_env_unlock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--auth-retries",
+                "3",
+                "--PROMPT",
+                "Review code.",
+                "--dry-run",
+            ]
+
+            with redirect_stdout(stdout):
+                exit_code = bridge.main(argv)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertFalse(payload["success"])
+        self.assertIn("AGY_BRIDGE_ALLOW_AUTH_RETRIES=1", payload["error"])
 
     def test_read_clipboard_authorization_code_uses_copied_callback(self) -> None:
         callback = "https://antigravity.google/callback?code=4/copiedCodeValue1234567890"

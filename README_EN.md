@@ -51,11 +51,11 @@ Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` aft
 
 ## OAuth Handling
 
-On macOS, `--auto-browser-auth` is enabled by default. The bridge listens for OAuth prompts and reads copied/browser-visible codes, but does not open OAuth URLs by default so it does not duplicate `agy`'s own browser open. If `agy` prints a URL but does not open a browser, pass `--open-auth-url`; then the bridge opens it once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). It defaults to `--auth-retries 1`, so it tries login once and avoids repeatedly opening fresh login pages while the user is not acting; increase it, for example to `--auth-retries 5`, only when the user is actively completing browser login.
+On macOS, `--auto-browser-auth` is enabled by default. The bridge listens for OAuth prompts and reads copied/browser-visible codes, but does not open OAuth URLs by default so it does not duplicate `agy`'s own browser open. `--open-auth-url` is rejected by default; only set `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` and pass `--open-auth-url` after confirming `agy` prints a URL but does not open a browser. Then the bridge opens it once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). It defaults to `--auth-retries 1`, so it tries login once; `--auth-retries > 1` is also rejected by default. Set `AGY_BRIDGE_ALLOW_AUTH_RETRIES=1` before increasing it only when the user is actively completing browser login and accepts repeated fresh OAuth URLs.
 
 During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge handles the code in memory. It does not create an `auth-code` file, and OAuth URLs or one-time codes are redacted from JSON output and transcripts. It will:
 
-- Parse the OAuth URL from `agy` output; only `--open-auth-url` makes the bridge open it in Chrome.
+- Parse the OAuth URL from `agy` output; only `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` plus `--open-auth-url` makes the bridge open it in Chrome.
 - Poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text.
 - Extract codes from callback-page `?code=...` URLs, HTML-escaped links, visible page text, or clipboard content.
 - Keep polling the clipboard while the OAuth prompt is active, so the page's `Copy to Clipboard` button can be read even when `agy` prints no further output; if needed, briefly copy front-browser page text and restore the previous clipboard.

@@ -30,18 +30,19 @@ Before long reviews, verify authentication with:
 agy --print-timeout 30s --print "Reply with exactly: ok"
 ```
 
-On macOS, the bridge enables `--auto-browser-auth` by default. It watches OAuth prompts and reads copied/browser-visible authorization codes, but it does not open OAuth URLs by default because `agy` may already open the browser. Use `--open-auth-url` only when agy prints a URL but does not open a browser; then the bridge opens each OAuth URL once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
+On macOS, the bridge enables `--auto-browser-auth` by default. It watches OAuth prompts and reads copied/browser-visible authorization codes, but it does not open OAuth URLs by default because `agy` may already open the browser. `--open-auth-url` is rejected by default; only set `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` and pass `--open-auth-url` after confirming agy prints a URL but does not open a browser. Then the bridge opens each OAuth URL once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
 
-1. detect the OAuth URL and, only with `--open-auth-url`, open it in Chrome;
+1. detect the OAuth URL and, only with `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` plus `--open-auth-url`, open it in Chrome;
 2. poll Chrome first, then Edge/Chromium/Safari tab URLs and readable page text for an OAuth `code`;
 3. detect codes embedded in callback-page links such as `?code=...`, including HTML-escaped relative URLs;
 4. while the OAuth prompt is active, keep polling the clipboard so the page's "Copy to Clipboard" button can be read even when `agy` prints no further output;
 5. if browser JavaScript access is disabled, briefly copy visible front-browser page text via clipboard, then restore the previous clipboard;
 6. submit the code to `agy` through the PTY without writing it to disk.
 
-Because agy's first-time OAuth prompt may expire quickly, the bridge supports explicit authentication retries, but defaults to a single attempt (`--auth-retries 1`) to avoid repeatedly opening login pages. Increase this only when the user is actively completing browser login and accepts repeated fresh OAuth URLs:
+Because agy's first-time OAuth prompt may expire quickly, the bridge supports explicit authentication retries, but defaults to a single attempt (`--auth-retries 1`) to avoid repeatedly opening login pages. `--auth-retries > 1` is rejected by default; increase it only after setting `AGY_BRIDGE_ALLOW_AUTH_RETRIES=1`, when the user is actively completing browser login and accepts repeated fresh OAuth URLs:
 
 ```bash
+AGY_BRIDGE_ALLOW_AUTH_RETRIES=1 \
 --auth-retries 5
 ```
 
