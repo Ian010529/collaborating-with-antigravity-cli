@@ -315,6 +315,43 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertIn("--model", mock_run.call_args.args[0])
             self.assertIn("Gemini 3.1 Pro (High)", mock_run.call_args.args[0])
 
+    def test_preflight_accepts_oauth_transcript_with_ok_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stdout = StringIO()
+            argv = [
+                "--cd",
+                tmp,
+                "--mode",
+                "review-code",
+                "--no-include-git-diff",
+                "--PROMPT",
+                "Review code.",
+            ]
+            preflight_output = "\n".join(
+                [
+                    "Authentication required",
+                    "Open this URL: https://accounts.google.com/o/oauth2/auth?client_id=fake",
+                    "Paste the authorization code here:",
+                    "4/copiedCodeValue1234567890",
+                    "ok",
+                ]
+            )
+
+            with mock.patch.object(
+                bridge,
+                "run_command",
+                side_effect=[(0, preflight_output, ""), (0, "review ok", "")],
+            ) as mock_run:
+                with redirect_stdout(stdout):
+                    exit_code = bridge.main(argv)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["agent_messages"], "review ok")
+            self.assertNotIn("preflight failed", payload.get("error", ""))
+            self.assertEqual(mock_run.call_count, 2)
+
     def test_fallback_model_retries_non_auth_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stdout = StringIO()

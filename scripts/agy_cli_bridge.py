@@ -637,19 +637,19 @@ def run_osascript(script: str, *, timeout_s: float) -> str:
 
 
 def is_preflight_ok(stdout: str) -> bool:
-    """Return true when agy answered the bridge health check with exactly `ok`.
+    """Return true when agy answered the bridge health check with an `ok` line.
 
-    PTY-backed CLI output may include ANSI control sequences or blank terminal
-    lines, so compare the meaningful normalized lines rather than raw stdout.
-    This intentionally still rejects warnings or extra prose: preflight should
-    prove the CLI can follow a tiny exact-output instruction before a long run.
+    PTY-backed OAuth can echo prompts, stale auth messages, and the pasted code
+    before the final model response. Accept an independent `ok` line so a
+    successful login + health check is not rejected because the transcript also
+    contains earlier authentication text.
     """
     lines = [
         line.strip()
         for line in normalize_pty_output(stdout).splitlines()
         if line.strip()
     ]
-    return len(lines) == 1 and lines[0].lower() == "ok"
+    return any(line.lower() == "ok" for line in lines)
 
 
 def run_local_command(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
