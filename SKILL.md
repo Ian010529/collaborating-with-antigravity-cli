@@ -24,11 +24,15 @@ Keep `.codex-antigravity/` out of git unless sanitized. Keep handoff files conci
 
 Prefer the bridge's default PTY mode. Do not add `--no-pty` unless PTY output is demonstrably broken; non-PTY execution cannot reliably accept pasted OAuth authorization codes and may not reuse the same auth state as interactive `agy`.
 
-Before long reviews, verify authentication with:
+Before long reviews, verify authentication through the bridge, not by running `agy` directly from Codex:
 
 ```bash
-agy --print-timeout 30s --print "Reply with exactly: ok"
+"$PYTHON" "$BRIDGE" --cd "$REPO" --mode ask \
+  --no-preflight --no-include-git-diff --response-budget none \
+  --PROMPT "Reply with exactly: ok"
 ```
+
+Do not run `agy --print-timeout ...` directly from Codex. Direct `agy` calls can open browser login pages outside the bridge, cannot reliably accept copied OAuth codes, and can leak raw OAuth URLs into tool logs.
 
 On macOS, the bridge enables `--auto-browser-auth` by default. It watches OAuth prompts and reads copied/browser-visible authorization codes, but it does not open OAuth URLs by default because `agy` may already open the browser. `--open-auth-url` is rejected by default; only set `AGY_BRIDGE_ALLOW_OPEN_AUTH_URL=1` and pass `--open-auth-url` after confirming agy prints a URL but does not open a browser. Then the bridge opens each OAuth URL once in Chrome by default (`AGY_AUTH_BROWSER="Google Chrome"`). During a PTY run, if `agy` prints an OAuth URL or asks for an authorization code, the bridge will:
 
@@ -122,5 +126,5 @@ pass `--no-pty` only as a last resort; if authentication fails, rerun without
 - Treat `agy` output as advice, not authority.
 - Do not rely on `agy` conversation ids; use handoff files.
 - `--test-command` executes locally and may create files; use it intentionally, preferably from a clean worktree.
-- If preflight fails, run `agy` directly to sign in, then verify with `agy --print-timeout 30s --print "Reply with exactly: ok"`. Do not create local files for OAuth values; rerun the bridge with default PTY and browser extraction enabled.
+- If preflight fails, do not run direct `agy` from Codex. Ask the user to complete manual sign-in in a terminal if needed, then verify through the bridge auth-check command above. Do not create local files for OAuth values; rerun the bridge with default PTY and browser extraction enabled.
 - If `agy` requests broader context, narrow the next prompt instead of dumping the whole repo.

@@ -106,6 +106,12 @@ BROWSER_APPS = (
 DEFAULT_AUTH_BROWSER = "Google Chrome"
 ALLOW_OPEN_AUTH_URL_ENV = "AGY_BRIDGE_ALLOW_OPEN_AUTH_URL"
 ALLOW_AUTH_RETRIES_ENV = "AGY_BRIDGE_ALLOW_AUTH_RETRIES"
+BRIDGE_AUTH_CHECK_HINT = (
+    "From Codex, do not run direct `agy --print-timeout ...` health checks. "
+    "Use this bridge with `--mode ask --no-preflight --no-include-git-diff "
+    "--response-budget none --PROMPT \"Reply with exactly: ok\"`; if manual sign-in is needed, "
+    "ask the user to run `agy` interactively in a terminal, then rerun the bridge check."
+)
 
 
 def configure_stdio() -> None:
@@ -1393,10 +1399,7 @@ def main(argv: list[str] | None = None) -> int:
         if preflight_rc != 0 or not is_preflight_ok(preflight_stdout):
             auth_hint = ""
             if is_authentication_error(preflight_stdout, preflight_stderr):
-                auth_hint = (
-                    "\n\nAntigravity CLI authentication appears unhealthy. Run `agy` in a terminal to sign in, "
-                    "then verify with `agy --print-timeout 30s --print \"Reply with exactly: ok\"`."
-                )
+                auth_hint = f"\n\nAntigravity CLI authentication appears unhealthy. {BRIDGE_AUTH_CHECK_HINT}"
             result = {
                 "success": False,
                 "error": f"Antigravity CLI preflight failed; skipped the longer review-code request.{auth_hint}",
@@ -1522,8 +1525,7 @@ def main(argv: list[str] | None = None) -> int:
             error_bits.append(f"Antigravity CLI exited with code {rc}.")
         if is_authentication_error(stdout, stderr):
             error_bits.append(
-                "Antigravity CLI authentication appears unhealthy. Run `agy` in a terminal to sign in, "
-                "then verify with `agy --print-timeout 30s --print \"Reply with exactly: ok\"`."
+                f"Antigravity CLI authentication appears unhealthy. {BRIDGE_AUTH_CHECK_HINT}"
             )
         if stderr.strip():
             error_bits.append(f"[stderr]\n{redact_auth_material(stderr.strip())}")

@@ -41,7 +41,7 @@ Override with `--model`. `review-plan` falls back to `Gemini 3.1 Pro (High)` aft
 
 - `review-plan` and `ask` default to `--print-timeout 5m0s`; `review-code` defaults to `15m0s`; the outer process timeout defaults to `--timeout-s 1800`.
 - POSIX systems enable `--pty` by default, so print-mode authentication/session behavior is closer to interactive `agy`. Use `--no-pty` only when PTY output is demonstrably broken.
-- `review-code` enables `--preflight` by default and first runs `agy --print-timeout 30s --print "Reply with exactly: ok"`. If login is missing, expired, or otherwise unhealthy, the bridge skips the longer review and tells you to run `agy` directly to sign in; a non-PTY authentication failure is retried once with PTY.
+- `review-code` enables the bridge's built-in `--preflight` by default, running a short PTY health check with redacted output. If login is missing, expired, or otherwise unhealthy, the bridge skips the longer review; do not run direct `agy` health checks from Codex. A non-PTY authentication failure is retried once with PTY.
 - `review-code` includes the current tracked `git diff` by default. If the diff is under `--max-diff-bytes` (default 120000), it sends the full diff; larger diffs are reduced to diff stat and file list.
 - When no explicit `--file` is provided, the bridge auto-extracts in-repo file paths from `--PROMPT`, capped by `--max-files 5`; it only warns when focus files exceed `--max-focus-bytes 200000`.
 - `--context-file` is repeatable and has a default combined cap of `--max-context-bytes 50000`. Missing files or over-limit context block the run.
@@ -82,10 +82,15 @@ Useful flags: `--agy-bin`, `--model`, `--print-timeout`, `--timeout-s`, `--fallb
 Login/auth check:
 
 ```bash
-agy --print-timeout 30s --print "Reply with exactly: ok"
+BRIDGE="${CODEX_HOME:-$HOME/.codex}/skills/collaborating-with-antigravity-cli/scripts/agy_cli_bridge.py"
+PYTHON=".venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON="python3"
+"$PYTHON" "$BRIDGE" --cd "$REPO" --mode ask \
+  --no-preflight --no-include-git-diff --response-budget none \
+  --PROMPT "Reply with exactly: ok"
 ```
 
-If authentication fails, run `agy` directly and sign in, then repeat the health check above. The bridge recognizes `authentication failed`, `please sign in`, `not signed in`, `sign in to`, `login required`, `authentication required`, `authentication timed out`, `authorization code`, and related auth failures so they are not mistaken for ordinary fallback-eligible timeouts. On `Ctrl-C`, the bridge exits cleanly with a JSON error and status 130.
+Do not run `agy --print-timeout ...` directly from Codex as a health check; direct calls bypass the bridge's PTY, clipboard code injection, and OAuth redaction, and may open extra browser login pages. If authentication fails, the user should complete manual `agy` sign-in in a terminal, then repeat the bridge health check above. The bridge recognizes `authentication failed`, `please sign in`, `not signed in`, `sign in to`, `login required`, `authentication required`, `authentication timed out`, `authorization code`, and related auth failures so they are not mistaken for ordinary fallback-eligible timeouts. On `Ctrl-C`, the bridge exits cleanly with a JSON error and status 130.
 
 Reliability flags: `--print-timeout`, `--preflight-timeout`, `--no-preflight`, `--no-include-git-diff`, `--max-diff-bytes`, `--fallback-model`, `--stream-status-interval-s`, `--no-pty`, `--no-auto-browser-auth`.
 

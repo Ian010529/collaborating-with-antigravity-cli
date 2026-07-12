@@ -41,7 +41,7 @@ git clone https://github.com/Ian010529/collaborating-with-antigravity-cli \
 
 - `review-plan` 和 `ask` 默认 `--print-timeout 5m0s`；`review-code` 默认 `15m0s`；外层进程 timeout 默认 `--timeout-s 1800`。
 - POSIX 系统默认启用 `--pty`，让 print-mode 的认证/session 行为更接近交互式 `agy`。只有 PTY 输出确实异常时才用 `--no-pty`。
-- `review-code` 默认启用 `--preflight`，先执行 `agy --print-timeout 30s --print "Reply with exactly: ok"`。如果检测到未登录、登录失效或认证失败，会跳过长审查并提示先直接运行 `agy` 登录；非 PTY 认证失败时会自动用 PTY 重试一次。
+- `review-code` 默认启用 bridge 内置 `--preflight`，通过 PTY 执行短健康检查并脱敏输出。如果检测到未登录、登录失效或认证失败，会跳过长审查；不要在 Codex 里直接运行 `agy` 健康检查。非 PTY 认证失败时会自动用 PTY 重试一次。
 - `review-code` 默认包含当前 tracked `git diff`。diff 小于 `--max-diff-bytes`（默认 120000）时传完整 diff；超过后只传 diff stat 和文件列表。
 - 如果没有显式 `--file`，bridge 会从 `--PROMPT` 自动提取仓库内文件路径，最多 `--max-files 5` 个；焦点文件总量超过 `--max-focus-bytes 200000` 时只给 warning。
 - `--context-file` 可重复传入，默认总上限 `--max-context-bytes 50000`。超限或文件不存在会直接阻止运行。
@@ -82,10 +82,15 @@ python scripts/agy_cli_bridge.py --cd "$REPO" --mode review-code \
 登录/认证排查：
 
 ```bash
-agy --print-timeout 30s --print "Reply with exactly: ok"
+BRIDGE="${CODEX_HOME:-$HOME/.codex}/skills/collaborating-with-antigravity-cli/scripts/agy_cli_bridge.py"
+PYTHON=".venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON="python3"
+"$PYTHON" "$BRIDGE" --cd "$REPO" --mode ask \
+  --no-preflight --no-include-git-diff --response-budget none \
+  --PROMPT "Reply with exactly: ok"
 ```
 
-如果提示登录失败，先直接运行 `agy` 完成登录，再重复上面的健康检查。bridge 会识别 `authentication failed`、`please sign in`、`not signed in`、`sign in to`、`login required`、`authentication required`、`authentication timed out`、`authorization code` 等认证错误，并避免把认证失败误判成可 fallback 的普通 timeout。按 `Ctrl-C` 中断时，bridge 会返回干净的 JSON 错误并以 130 退出。
+不要在 Codex 里直接运行 `agy --print-timeout ...` 做健康检查；直接调用会绕过 bridge 的 PTY、剪贴板 code 注入和 OAuth 脱敏，也可能在浏览器里额外打开登录页。如果提示登录失败，需要用户手动在终端完成 `agy` 登录，再重复上面的 bridge 健康检查。bridge 会识别 `authentication failed`、`please sign in`、`not signed in`、`sign in to`、`login required`、`authentication required`、`authentication timed out`、`authorization code` 等认证错误，并避免把认证失败误判成可 fallback 的普通 timeout。按 `Ctrl-C` 中断时，bridge 会返回干净的 JSON 错误并以 130 退出。
 
 常用可靠性参数：`--print-timeout`、`--preflight-timeout`、`--no-preflight`、`--no-include-git-diff`、`--max-diff-bytes`、`--fallback-model`、`--stream-status-interval-s`、`--no-pty`、`--no-auto-browser-auth`。
 

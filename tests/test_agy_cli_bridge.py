@@ -310,7 +310,8 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertFalse(payload["success"])
             self.assertIn("preflight failed", payload["error"])
-            self.assertIn("sign in", payload["error"])
+            self.assertIn("do not run direct `agy", payload["error"])
+            self.assertIn("--mode ask", payload["error"])
             mock_run.assert_called_once()
             self.assertIn("--model", mock_run.call_args.args[0])
             self.assertIn("Gemini 3.1 Pro (High)", mock_run.call_args.args[0])
@@ -433,7 +434,8 @@ class AgyCliBridgeTests(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertFalse(payload["success"])
             self.assertNotIn("fallback", payload["meta"])
-            self.assertIn("sign in", payload["error"])
+            self.assertIn("do not run direct `agy", payload["error"])
+            self.assertIn("--mode ask", payload["error"])
             self.assertEqual(mock_run.call_count, 1)
 
     def test_extract_authorization_code_from_callback_url_and_html(self) -> None:
